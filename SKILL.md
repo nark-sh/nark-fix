@@ -45,6 +45,14 @@ If it contains `"tsconfig": "<path>"`, use that. Otherwise discover same as bc-s
 
 Same as bc-scan skill Step 3. Store as `$REPO_ID`.
 
+### Step 0.4 — Capture current branch
+
+```bash
+CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "local")
+```
+
+Store as `$CURRENT_BRANCH`. This is shown in the plan and final report so it's clear which branch was fixed.
+
 ---
 
 ## Phase 1 — Baseline Scan
@@ -133,6 +141,7 @@ Before writing any code, present the full plan to the user. Format:
 Behavioral Contracts — Fix Plan
 ═══════════════════════════════════════════════════════════
 
+Branch:    <$CURRENT_BRANCH>
 Baseline:  <N> violations (<E> errors, <W> warnings)
 Approach:  <Universal helper + per-package / Per-package only / Universal only>
 
@@ -263,6 +272,7 @@ Run one last scan. Upload as the "after" state.
 Behavioral Contracts — Fix Complete
 ═══════════════════════════════════════════════════════════
 
+Branch:    <$CURRENT_BRANCH>
 Started:   <BASELINE_SCAN_ID> — <N> violations (<E> errors, <W> warnings)
 Final:     <FINAL_SCAN_ID>   — <N> violations (<E> errors, <W> warnings)
 
