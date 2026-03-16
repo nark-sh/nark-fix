@@ -53,6 +53,20 @@ CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "local")
 
 Store as `$CURRENT_BRANCH`. This is shown in the plan and final report so it's clear which branch was fixed.
 
+### Step 0.5 — Get CLI version
+
+```bash
+CLI_VERSION=$(npm show @behavioral-contracts/verify-cli@latest version --prefer-offline 2>/dev/null)
+if [ -z "$CLI_VERSION" ]; then
+  CLI_VERSION=$(npm show @behavioral-contracts/verify-cli@latest version 2>/dev/null)
+fi
+if [ -z "$CLI_VERSION" ]; then
+  CLI_VERSION="unknown"
+fi
+```
+
+`--prefer-offline` is used first to bypass a known macOS npm cache issue (`EPERM` on root-owned cache files). Store as `$CLI_VERSION` — used in all upload payloads throughout the fix loop.
+
 ---
 
 ## Phase 1 — Baseline Scan
