@@ -96,9 +96,59 @@ If output file not created, show error and stop.
 
 ### Step 1.2 — Upload baseline (unless --skip-upload)
 
-Build and POST the upload payload same as bc-scan skill Step 7. This records the "before" state in the dashboard.
+Build and POST the upload payload to `$BASE_URL/api/mcp/upload`. This records the "before" state in the dashboard.
 
-Store `$BASELINE_SCAN_ID` from response.
+**Field mapping — verify-cli JSON → API payload:**
+
+| verify-cli field | API field | Notes |
+|-----------------|-----------|-------|
+| `violations[].package` | `packageName` | string |
+| `violations[].postconditionId` | `rule` | string |
+| `violations[].severity` | `severity` | **Uppercase**: `"error"` → `"ERROR"` |
+| `violations[].message` | `message` | string |
+| `violations[].file` | `filePath` | string |
+| `violations[].line` | `lineNumber` | number |
+| `violations[].column` | `columnNumber` | number (omit if null) |
+| `violations[].function` | `functionName` | string (omit if null) |
+| `violations[].codeContext` | `codeSnippet` | string (omit if null) |
+| `violations[].subViolations[]` | `subViolations` | map each: `{postconditionId, message, severity: UPPERCASE}` — omit field if empty |
+| `summary.files_analyzed` | `summary.scannedFiles` | number |
+
+Full payload shape:
+```json
+{
+  "repositoryId": "$REPO_ID",
+  "cliVersion": "$CLI_VERSION",
+  "branch": "<git branch --show-current>",
+  "commitSha": "<git rev-parse --short HEAD>",
+  "githubFullName": "$GITHUB_FULL_NAME",
+  "violations": [ /* mapped per table above */ ],
+  "summary": {
+    "totalViolations": "<violations.length + sum(subViolations.length)>",
+    "errorCount": "<ERRORs across primary + sub>",
+    "warningCount": "<WARNINGs across primary + sub>",
+    "scannedFiles": "<summary.files_analyzed>"
+  },
+  "packageCallSiteCounts": {
+    "<pkg>": "<callSiteCount>"
+  }
+}
+```
+
+Notes:
+- `severity` MUST be uppercase (`"ERROR"` / `"WARNING"`). The CLI outputs lowercase.
+- `githubFullName` — only include when `$GITHUB_FULL_NAME` matches `owner/repo` pattern. Omit (don't send empty string) otherwise.
+- `packageCallSiteCounts` — built from `packages[].callSiteCount` in CLI JSON (available since CLI v2.2.1). Omit if CLI output has no `packages` array.
+- `totalViolations` / `errorCount` / `warningCount` MUST include sub-violations.
+
+```bash
+curl -s -X POST $BASE_URL/api/mcp/upload \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d @/tmp/bc-fix-upload.json
+```
+
+Store `$BASELINE_SCAN_ID` from the `scanId` field of the response. If `success` is not `true`, show the error and stop.
 
 ### Step 1.3 — Build violation ID map (unless --skip-upload)
 
@@ -147,7 +197,15 @@ Only applies when `--package <name>` was specified **and** the baseline scan sho
    ```
    No <package> violations found with <configured-tsconfig>.
    Found <root-tsconfig> which may include more paths (e.g. packages/, scripts/).
-   Try root tsconfig instead? (yes/no)
+   Use AskUserQuestion(
+     header: "Tsconfig Scope",
+     question: "No <package> violations found with <configured-tsconfig>. Try root tsconfig instead?",
+     options: [
+       { label: "Yes — use root tsconfig", description: "Re-run scan with <root-tsconfig>" },
+       { label: "No — keep current", description: "Continue with <configured-tsconfig>" }
+     ],
+     multiSelect: false
+   )
    ```
 3. If user confirms: re-run Steps 1.1–1.3 with the root tsconfig. Update `$TSCONFIG_PATH`.
 
@@ -228,14 +286,20 @@ For each violation in the scan output:
 | `connection-error` | caller already catches connection error type |
 | `$disconnect` | call is inside `.finally()` or a shutdown/cleanup handler |
 
-### Step 2.5.2 — Label each violation
+### Step 2.5.2 — Label each violation and its sub-violations
 
-Assign one label per violation:
+Assign one label **per postcondition** — primary violation AND each sub-violation independently:
 - **TRUE POSITIVE** — the concern is real and not already addressed; fix needed
 - **LIKELY FALSE POSITIVE** — the concern appears already handled; scanner missed existing code
 - **BORDERLINE** — ambiguous; explain why; lean toward fixing unless clearly redundant
 
-For each LIKELY FALSE POSITIVE, capture:
+**Sub-violations must be labeled separately.** A single call site can have a FP primary (`file-not-found`) and a TP sub-violation (`permission-denied`). Collapsing them to one label loses the signal. Track sub-violation labels as:
+```
+{violationId, subViolationIndex, postconditionId, label}
+```
+where `subViolationIndex` is the 0-based position in the `subViolations[]` array.
+
+For each LIKELY FALSE POSITIVE (primary or sub), capture:
 - The exact line(s) that already satisfy the concern
 - **Why the scanner got it wrong** — what pattern did verify-cli fail to detect? What does the corpus contract not cover?
 
@@ -247,23 +311,30 @@ Show the triage table **before** the fix plan:
 Triage Results
 ─────────────────────────────────────────────────────────────
   TRUE POSITIVE (N):
-    • <file>:<line> — <postconditionId>
+    • <file>:<line> — <postconditionId>                     [primary]
+    • <file>:<line> — <postconditionId> (sub[0])            [sub-violation]
 
   LIKELY FALSE POSITIVE (N):
-    • <file>:<line> — <postconditionId>
-      Already handled: line <X> satisfies this (e.g. "null check on line 29")
+    • <file>:<line> — <postconditionId>                     [primary]
+      Already handled: line <X> satisfies this
       Scanner issue: <why verify-cli/corpus missed this>
+    • <file>:<line> — <postconditionId> (sub[1])            [sub-violation]
+      Already handled: <explanation>
+      Scanner issue: <explanation>
 
   BORDERLINE (N):
     • <file>:<line> — <postconditionId>
       Reason: <why it's ambiguous>
 ─────────────────────────────────────────────────────────────
 Proceeding to fix plan for <M> actionable violations (<TP> true positives + <B> borderline).
+Note: sub-violation labels will produce MIXED badges on the dashboard when they differ from primary.
 ```
 
 ### Step 2.5.4 — Push triage feedback to dashboard (unless --skip-upload)
 
-After completing triage, push all labels to the dashboard in batch:
+After completing triage, push labels in two passes: **primary violations first, then sub-violations**.
+
+#### Pass A — Primary violation labels
 
 1. **TRUE POSITIVES** — call `batch_review_violations` MCP tool:
    ```
@@ -299,6 +370,26 @@ After completing triage, push all labels to the dashboard in batch:
 
    Add each note to `$SCANNER_ISSUES` for the Phase 5 report (deduplicate by improvement description).
 
+#### Pass B — Sub-violation labels (per-postcondition)
+
+For every sub-violation that has a **different label from its parent**, call `batch_review_violations` individually with `subViolationIndex`:
+
+```
+Arguments: {
+  violationIds: [<parent dashboard violation ID>],
+  action: "<TRUE_POSITIVE | FALSE_POSITIVE | FLAG>",
+  subViolationIndex: <0-based index in subViolations array>
+}
+```
+
+Call once per sub-violation that needs a label. Sub-violations with the **same label as the primary** do not need a separate call — they inherit. Only call when the label differs.
+
+**Example:** Primary is FALSE_POSITIVE, but sub[0] (`permission-denied`) is TRUE_POSITIVE:
+```
+batch_review_violations({ violationIds: ["id"], action: "TRUE_POSITIVE", subViolationIndex: 0 })
+```
+This produces a MIXED badge on the dashboard instead of collapsing everything to FALSE_POSITIVE.
+
 5. If a dashboard violation ID is not found in `$VIOLATION_ID_MAP` for a given violation (match failure), skip the feedback call for that violation and log: "No dashboard ID found for <file>:<line>:<package> — skipping feedback".
 
 ---
@@ -333,7 +424,21 @@ Approach:  <Universal helper + per-package / Per-package only / Universal only>
 ─── After each batch ────────────────────────────────────────────────
   Commit → rescan → upload delta → push resolve feedback to dashboard
 
-Proceed? (yes / no / customize)
+```
+
+After displaying the plan, use the AskUserQuestion tool with a dropdown:
+
+```
+AskUserQuestion(
+  header: "Fix Plan Approval",
+  question: "Ready to apply these fixes?",
+  options: [
+    { label: "Yes — proceed", description: "Apply all batches as planned" },
+    { label: "No — abort", description: "Cancel without making any changes" },
+    { label: "Customize", description: "Modify the plan before proceeding" }
+  ],
+  multiSelect: false
+)
 ```
 
 **WAIT for user response before proceeding.**
@@ -434,7 +539,15 @@ Call individually (not batch) to provide rich per-violation detail. If the dashb
 ### Step 4.5 — Check for regressions or unexpected violations
 
 If the new scan reveals violations NOT in the original baseline:
-- Report them: "Found 2 new violations not in baseline — likely uncovered by fix. Add to next batch? (yes/no)"
+- Report them, then use AskUserQuestion(
+    header: "New Violations Detected",
+    question: "Found <N> new violations not in the original baseline — likely uncovered by the fix. Add to next batch?",
+    options: [
+      { label: "Yes — add to plan", description: "Append new violations to the fix queue and continue" },
+      { label: "No — skip", description: "Leave them for a future run" }
+    ],
+    multiSelect: false
+  )
 
 ### Step 4.6 — Loop
 
@@ -525,7 +638,7 @@ The following MCP tools are called on the `behavioral-contracts` server througho
 | `list_packages_with_errors` | Phase 1.3 — after baseline upload | `repositoryId` |
 | `list_errors_for_package` | Phase 1.3 — per package | `repositoryId`, `packageName` |
 | `get_resolution_history` | Phase 2.1.5 — per package | `packageName` |
-| `batch_review_violations` | Phase 2.5.4 — after triage | `violationIds[]`, `action` (TRUE_POSITIVE/FALSE_POSITIVE/FLAG) |
+| `batch_review_violations` | Phase 2.5.4 — after triage | `violationIds[]`, `action` (TRUE_POSITIVE/FALSE_POSITIVE/FLAG), optional `subViolationIndex` (0-based, for per-postcondition labels) |
 | `add_violation_note` | Phase 2.5.4 — per FP | `violationId`, `note` (scanner shortcoming description) |
 | `resolve_violation` | Step 4.4 — per fixed violation | `violationId`, `resolutionDetail` |
 
@@ -552,7 +665,15 @@ The following MCP tools are called on the `behavioral-contracts` server througho
 
 **No TypeScript project / no tsconfig found:** Stop with message "No tsconfig.json found."
 
-**All violations are in test files:** Note this in the plan. Ask: "All violations are in test files. Fix those too? (yes/no)"
+**All violations are in test files:** Note this in the plan, then use AskUserQuestion(
+  header: "Test File Violations",
+  question: "All violations are in test files. Fix those too?",
+  options: [
+    { label: "Yes — fix test files too", description: "Include test file violations in the fix plan" },
+    { label: "No — skip test files", description: "Leave test file violations unfixed" }
+  ],
+  multiSelect: false
+)
 
 **Violations in generated files:** Skip them. Note: "Skipped <N> violations in generated files."
 
