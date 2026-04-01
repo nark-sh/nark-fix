@@ -15,6 +15,8 @@ Agentic loop that scans a repo for behavioral contract violations, triages false
 /bc-fix --dry-run          # Scan + show plan, but make no changes
 /bc-fix --package <name>   # Fix only violations for one package (e.g. axios)
 /bc-fix --skip-upload      # Run locally only, no dashboard upload or MCP feedback
+/bc-fix --local            # Point at http://localhost:3000 instead of production (for saas development)
+/bc-fix --auto             # Fully autonomous: skip all approval gates and prompts, run every package to completion
 ```
 
 ---
@@ -33,46 +35,34 @@ If no key found and `--skip-upload` not set: tell the user "API key not found. S
 
 Store as `$API_KEY`.
 
-### Step 0.2 — Find tsconfig
+### Step 0.2 — Resolve base URL
 
-Check `.bc-scan` config file first:
-```bash
-cat .bc-scan 2>/dev/null
-```
-If it contains `"tsconfig": "<path>"`, use that. Otherwise discover same as bc-scan skill (Step 2).
+Resolve in priority order:
+1. `--local` flag passed at invocation → use `http://localhost:3000`
+2. `.bc-scan` config file `baseUrl` field
+3. `$BC_BASE_URL` environment variable
+4. Default: `https://app.behavioral-contracts.com`
 
-### Step 0.3 — Resolve base URL
-
-Check `.bc-scan` config file for `baseUrl`. If present use it. Otherwise check `$BC_BASE_URL` env var. Default to `https://app.behavioral-contracts.com`.
+When `--local` is set, also resolve the API key from the local dev `.env` or `.env.local` file in the saas app if the standard key lookup (Step 0.1) fails — local dev keys may differ from production keys.
 
 Store as `$BASE_URL`.
 
-### Step 0.4 — Resolve repository ID
+### Step 0.3 — Resolve repository ID
 
 Same as bc-scan skill Step 3. Store as `$REPO_ID`.
 
-### Step 0.5 — Capture current branch
+### Step 0.4 — Capture current branch
 
 ```bash
 CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "local")
 ```
 
-### Step 0.6 — Get CLI version
-
-```bash
-CLI_VERSION=$(npm show @behavioral-contracts/verify-cli@latest version --prefer-offline 2>/dev/null)
-if [ -z "$CLI_VERSION" ]; then
-  CLI_VERSION=$(npm show @behavioral-contracts/verify-cli@latest version 2>/dev/null)
-fi
-if [ -z "$CLI_VERSION" ]; then CLI_VERSION="unknown"; fi
-```
-
-### Step 0.7 — Initialize feedback state
+### Step 0.5 — Initialize feedback state
 
 Create an in-memory (working notes) structure to track across the full session:
 
 ```
-$VIOLATION_ID_MAP       = {}   # "{file}:{line}:{package}:{postconditionId}" → dashboardViolationId
+$VIOLATION_ID_MAP       = {}   # "{filePath}:{lineNumber}:{packageName}:{postconditionId}" → dashboardViolationId
 $FP_NOTES              = []   # [{violationId, note}] — scanner shortcomings from FP triage
 $RESOLVED_VIOLATIONS   = []   # [{violationId, resolutionDetail}] — fixed violations
 $SCANNER_ISSUES        = []   # Deduplicated scanner/corpus improvement opportunities
@@ -80,79 +70,58 @@ $SCANNER_ISSUES        = []   # Deduplicated scanner/corpus improvement opportun
 
 ---
 
-## Phase 1 — Baseline Scan
+## Phase 1 — Triggering cloud baseline scan...
 
-### Step 1.1 — Run verify-cli
+### Step 1.1 — Trigger cloud baseline scan
 
+Get current branch:
 ```bash
-npx @behavioral-contracts/verify-cli@latest \
-  --tsconfig <tsconfig_path> \
-  --output /tmp/bc-fix-baseline.json \
-  --include-drafts \
-  --no-terminal
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "local")
 ```
 
-If output file not created, show error and stop.
-
-### Step 1.2 — Upload baseline (unless --skip-upload)
-
-Build and POST the upload payload to `$BASE_URL/api/mcp/upload`. This records the "before" state in the dashboard.
-
-**Field mapping — verify-cli JSON → API payload:**
-
-| verify-cli field | API field | Notes |
-|-----------------|-----------|-------|
-| `violations[].package` | `packageName` | string |
-| `violations[].postconditionId` | `rule` | string |
-| `violations[].severity` | `severity` | **Uppercase**: `"error"` → `"ERROR"` |
-| `violations[].message` | `message` | string |
-| `violations[].file` | `filePath` | string |
-| `violations[].line` | `lineNumber` | number |
-| `violations[].column` | `columnNumber` | number (omit if null) |
-| `violations[].function` | `functionName` | string (omit if null) |
-| `violations[].codeContext` | `codeSnippet` | string (omit if null) |
-| `violations[].subViolations[]` | `subViolations` | map each: `{postconditionId, message, severity: UPPERCASE}` — omit field if empty |
-| `summary.files_analyzed` | `summary.scannedFiles` | number |
-
-Full payload shape:
-```json
-{
-  "repositoryId": "$REPO_ID",
-  "cliVersion": "$CLI_VERSION",
-  "branch": "<git branch --show-current>",
-  "commitSha": "<git rev-parse --short HEAD>",
-  "githubFullName": "$GITHUB_FULL_NAME",
-  "violations": [ /* mapped per table above */ ],
-  "summary": {
-    "totalViolations": "<violations.length + sum(subViolations.length)>",
-    "errorCount": "<ERRORs across primary + sub>",
-    "warningCount": "<WARNINGs across primary + sub>",
-    "scannedFiles": "<summary.files_analyzed>"
-  },
-  "packageCallSiteCounts": {
-    "<pkg>": "<callSiteCount>"
-  }
-}
-```
-
-Notes:
-- `severity` MUST be uppercase (`"ERROR"` / `"WARNING"`). The CLI outputs lowercase.
-- `githubFullName` — only include when `$GITHUB_FULL_NAME` matches `owner/repo` pattern. Omit (don't send empty string) otherwise.
-- `packageCallSiteCounts` — built from `packages[].callSiteCount` in CLI JSON (available since CLI v2.2.1). Omit if CLI output has no `packages` array.
-- `totalViolations` / `errorCount` / `warningCount` MUST include sub-violations.
-
+Trigger a cloud scan via the MCP endpoint:
 ```bash
-curl -s -X POST $BASE_URL/api/mcp/upload \
+curl -s -X POST $BASE_URL/api/mcp \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d @/tmp/bc-fix-upload.json
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"trigger_scan\",\"arguments\":{\"repositoryId\":\"$REPO_ID\",\"branch\":\"$CURRENT_BRANCH\"}},\"id\":1}"
 ```
 
-Store `$BASELINE_SCAN_ID` from the `scanId` field of the response. If `success` is not `true`, show the error and stop.
+**Hung scan handling:** If the response returns `success: false` with an `existingScan` that is `QUEUED` or `RUNNING`, call `cancel_scan` to clear it, then re-trigger:
 
-### Step 1.3 — Build violation ID map (unless --skip-upload)
+```bash
+# Cancel the hung scan
+curl -s -X POST $BASE_URL/api/mcp \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"cancel_scan\",\"arguments\":{\"scanId\":\"$EXISTING_SCAN_ID\"}},\"id\":1}"
 
-After uploading, use MCP tools to fetch dashboard violation IDs so we can push triage feedback later:
+# Re-trigger now that the slot is clear
+curl -s -X POST $BASE_URL/api/mcp \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"trigger_scan\",\"arguments\":{\"repositoryId\":\"$REPO_ID\",\"branch\":\"$CURRENT_BRANCH\"}},\"id\":1}"
+```
+
+Parse `.result.scan.id` from the response as `$BASELINE_SCAN_ID`. If the request fails or returns no scan id, show the error and stop.
+
+Poll for completion using the `poll_scan_status` MCP tool (handles polling internally):
+```bash
+curl -s -X POST $BASE_URL/api/mcp \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"poll_scan_status\",\"arguments\":{\"scanId\":\"$BASELINE_SCAN_ID\"}},\"id\":1}"
+```
+
+Parse `.result.status` — if `"FAILED"`, show error and stop.
+
+Use the cloud scan results as the baseline. Fetch violations via MCP tools:
+- Call `list_packages_with_errors` with `{ repositoryId: $REPO_ID }`
+- For each package, call `list_errors_for_package` with `{ repositoryId: $REPO_ID, packageName: "<package>" }`
+
+Store `$BASELINE_SCAN_ID` for use in subsequent steps.
+
+### Step 1.2 — Build violation ID map (unless --skip-upload)
 
 Call `list_packages_with_errors` MCP tool:
 ```
@@ -164,9 +133,9 @@ For each package returned, call `list_errors_for_package` MCP tool:
 Arguments: { repositoryId: $REPO_ID, packageName: "<package>" }
 ```
 
-For each violation returned by the dashboard, match to local scan violations by normalized key:
+For each violation returned by the dashboard, build the normalized key using actual violation fields (`filePath`, `lineNumber`) and the package name from the enclosing `list_errors_for_package` call:
 ```
-key = "{relative_file_path}:{line}:{package}:{postconditionId}"
+key = "{filePath}:{lineNumber}:{packageName}:{postconditionId}"
 ```
 Build `$VIOLATION_ID_MAP[key] = dashboardViolation.id`.
 
@@ -174,9 +143,9 @@ If MCP tools are unavailable (server offline), log "Dashboard feedback will be s
 
 **Note:** `list_packages_with_errors` and `list_errors_for_package` are MCP tools registered on the `behavioral-contracts` server. Call them via the MCP tool interface directly (not curl).
 
-### Step 1.4 — Check if already clean
+### Step 1.3 — Check if already clean
 
-Parse `/tmp/bc-fix-baseline.json`. If zero violations (or zero ERRORs when running without `--warnings`):
+If zero violations from the MCP data (or zero ERRORs when running without `--warnings`):
 
 ```
 Nothing to fix — repo is already clean.
@@ -184,34 +153,6 @@ Scan ID: <BASELINE_SCAN_ID>
 ```
 
 Stop.
-
-### Step 1.5 — Detect package/tsconfig scope mismatch (when --package is set)
-
-Only applies when `--package <name>` was specified **and** the baseline scan shows **zero** violations for that package.
-
-1. Find all tsconfigs in the repo:
-   ```bash
-   find . -name "tsconfig.json" -not -path "*/node_modules/*" | sort
-   ```
-2. If a root-level `tsconfig.json` exists and the configured tsconfig is in a subdirectory, prompt:
-   ```
-   No <package> violations found with <configured-tsconfig>.
-   Found <root-tsconfig> which may include more paths (e.g. packages/, scripts/).
-   Use AskUserQuestion(
-     header: "Tsconfig Scope",
-     question: "No <package> violations found with <configured-tsconfig>. Try root tsconfig instead?",
-     options: [
-       { label: "Yes — use root tsconfig", description: "Re-run scan with <root-tsconfig>" },
-       { label: "No — keep current", description: "Continue with <configured-tsconfig>" }
-     ],
-     multiSelect: false
-   )
-   ```
-3. If user confirms: re-run Steps 1.1–1.3 with the root tsconfig. Update `$TSCONFIG_PATH`.
-
-### Step 1.6 — Offer to update .bc-scan on scope change
-
-If tsconfig changed in Step 1.5, prompt to update `.bc-scan`.
 
 ---
 
@@ -221,7 +162,7 @@ If tsconfig changed in Step 1.5, prompt to update `.bc-scan`.
 
 ### Step 2.1 — Group violations by package
 
-From the violations array, group by `violation.package`. For each package group, list:
+From the violations array (grouped by the `packageName` used in each `list_errors_for_package` call — violations themselves have no `package` field), list per package group:
 - Package name
 - Violation count (ERRORs / WARNINGs)
 - Postcondition IDs involved
@@ -426,7 +367,9 @@ Approach:  <Universal helper + per-package / Per-package only / Universal only>
 
 ```
 
-After displaying the plan, use the AskUserQuestion tool with a dropdown:
+If `--auto` was passed: print the plan and immediately proceed without asking. Do not use AskUserQuestion.
+
+Otherwise, use the AskUserQuestion tool with a dropdown:
 
 ```
 AskUserQuestion(
@@ -495,17 +438,9 @@ If pre-commit hook fails: fix the hook error, re-stage, create a NEW commit (nev
 
 ### Step 4.3 — Rescan and upload
 
-Run verify-cli again:
+Trigger a new cloud scan and poll to completion (same procedure as Step 1.1 — use `trigger_scan` then `poll_scan_status` via `/api/mcp`).
 
-```bash
-npx @behavioral-contracts/verify-cli@latest \
-  --tsconfig <tsconfig_path> \
-  --output /tmp/bc-fix-progress.json \
-  --include-drafts \
-  --no-terminal
-```
-
-Upload results (unless `--skip-upload`). Show delta with severity breakdown:
+Fetch results via MCP tools (unless `--skip-upload`). Show delta with severity breakdown:
 
 ```
 Batch <N> complete
@@ -539,7 +474,9 @@ Call individually (not batch) to provide rich per-violation detail. If the dashb
 ### Step 4.5 — Check for regressions or unexpected violations
 
 If the new scan reveals violations NOT in the original baseline:
-- Report them, then use AskUserQuestion(
+
+- If `--auto` is set: automatically append them to the fix queue, log "Auto-adding <N> newly uncovered violations to next batch", and continue.
+- Otherwise: use AskUserQuestion(
     header: "New Violations Detected",
     question: "Found <N> new violations not in the original baseline — likely uncovered by the fix. Add to next batch?",
     options: [
@@ -553,7 +490,7 @@ If the new scan reveals violations NOT in the original baseline:
 
 If violations remain and more batches exist: proceed to next batch (no additional approval needed once the plan is approved).
 
-If new violations were discovered in 4.5 and user said yes: append them to the plan and continue.
+If new violations were discovered in 4.5 and user said yes (or `--auto` is set): append them to the plan and continue.
 
 ---
 
@@ -570,7 +507,7 @@ git push
 
 ### Step 5.2 — Final scan
 
-Run one last scan. Upload as the "after" state.
+Trigger one final cloud scan (same as Step 1.1 — use `trigger_scan` then `poll_scan_status` via `/api/mcp`) and wait for completion.
 
 ### Step 5.3 — Report
 
@@ -621,11 +558,82 @@ These notes are already stored in the dashboard on the individual violations. Th
 
 If zero issues: "No scanner false positives detected — corpus coverage looks good for this codebase."
 
-### Step 5.5 — Cleanup
+### Step 5.5 — Triage Report
 
-```bash
-rm -f /tmp/bc-fix-baseline.json /tmp/bc-fix-progress.json
+Write a `bc-triage-report.md` file to the repo root. This file is meant to be shared with other developers and the corpus team. It should be comprehensive and standalone.
+
+**File path:** `<repo root>/bc-triage-report.md`
+
+**Content structure:**
+
+```markdown
+# Behavioral Contracts Triage Report
+**Repository:** <githubFullName or local path>
+**Branch:** <branch> @ <commitSha>
+**Scan ID:** <BASELINE_SCAN_ID> → <FINAL_SCAN_ID>
+**Date:** <today>
+
+---
+
+## Summary
+
+| Package | Violations | Verdict | Action |
+|---------|-----------|---------|--------|
+| `<pkg>` | N | ✅ TRUE POSITIVE / ❌ FALSE POSITIVE / Mixed | Code fixes applied / No changes — scanner limitation / N fixed, M FP |
+| **Total** | **N** | | |
+
+---
+
+## <Package> — <N> TRUE POSITIVES / FALSE POSITIVES / Mixed
+
+### What the scanner found
+<Describe the postconditionIds flagged and what they mean in this codebase>
+
+### Hotspot breakdown (if TPs)
+| File | Violations |
+...
+
+### Fix patterns applied (if TPs)
+<Before/after code examples showing exactly what was changed>
+
+### Why these are false positives (if FPs)
+<Explain what existing code already satisfies the postcondition>
+<Explain what pattern the scanner failed to recognize>
+
+### Borderline cases (if any)
+| File | Issue |
+...
+
+---
+
+## Scanner/Corpus Improvement Opportunities
+
+<For each FP group, describe the specific corpus or verify-cli change needed>
+
+---
+
+## What Was Sent to the Dashboard
+
+| Action | Count | Package |
+...
+
+---
+
+## Next Steps (if any violations remain)
+
+<List remaining violations and what to do about them>
+
+---
+
+*Generated by Behavioral Contracts bc-fix workflow · Scan <BASELINE_SCAN_ID>*
 ```
+
+**Rules:**
+- Include real before/after code examples, not placeholders — copy actual code from the fixed files
+- For FP groups, always include "Root cause" explaining the scanner limitation
+- For TP groups, include the hotspot file breakdown table
+- If `--dry-run` was used and no fixes were applied, note that in the summary
+- If `--skip-upload` was used, omit the "What Was Sent to the Dashboard" section
 
 ---
 
@@ -633,10 +641,18 @@ rm -f /tmp/bc-fix-baseline.json /tmp/bc-fix-progress.json
 
 The following MCP tools are called on the `behavioral-contracts` server throughout this skill. All require the server to be registered and reachable. If unreachable, fallback to `--skip-upload` behavior (fixes still happen, no feedback is pushed).
 
+All MCP tools are called via `POST $BASE_URL/api/mcp` with JSON-RPC body:
+```
+{"jsonrpc":"2.0","method":"tools/call","params":{"name":"<tool>","arguments":{...}},"id":1}
+```
+
 | Tool | When called | Key arguments |
 |------|-------------|---------------|
-| `list_packages_with_errors` | Phase 1.3 — after baseline upload | `repositoryId` |
-| `list_errors_for_package` | Phase 1.3 — per package | `repositoryId`, `packageName` |
+| `trigger_scan` | Step 1.1 — trigger cloud scan | `repositoryId`, `branch` |
+| `cancel_scan` | Step 1.1 — cancel a hung QUEUED/RUNNING scan before re-triggering | `scanId` |
+| `poll_scan_status` | Step 1.1 — wait for scan to finish | `scanId` — polls internally, returns when done |
+| `list_packages_with_errors` | Step 1.2 — fetch packages after scan | `repositoryId` |
+| `list_errors_for_package` | Step 1.2 — per package | `repositoryId`, `packageName` |
 | `get_resolution_history` | Phase 2.1.5 — per package | `packageName` |
 | `batch_review_violations` | Phase 2.5.4 — after triage | `violationIds[]`, `action` (TRUE_POSITIVE/FALSE_POSITIVE/FLAG), optional `subViolationIndex` (0-based, for per-postcondition labels) |
 | `add_violation_note` | Phase 2.5.4 — per FP | `violationId`, `note` (scanner shortcoming description) |
@@ -662,8 +678,6 @@ The following MCP tools are called on the `behavioral-contracts` server througho
 ## Edge Cases
 
 **MCP server offline:** Log warning, set `SKIP_FEEDBACK=true`, continue with local fixes. All fix logic still executes.
-
-**No TypeScript project / no tsconfig found:** Stop with message "No tsconfig.json found."
 
 **All violations are in test files:** Note this in the plan, then use AskUserQuestion(
   header: "Test File Violations",
