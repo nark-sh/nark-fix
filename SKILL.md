@@ -19,11 +19,54 @@ Agentic loop that scans a repo for behavioral contract violations, triages false
 /bc-fix --auto             # Fully autonomous: skip all approval gates and prompts, run every package to completion
 /bc-fix --batch            # Scan once → fix all → rescan once. No intermediate scans. For automated use.
 /bc-fix --batch --auto     # Fully autonomous batch mode (no approval gate + no intermediate scans)
+/bc-fix --resume            # Explicitly resume from .bc-fix-state.json (same as auto-detection)
+/bc-fix --fresh             # Ignore any existing state file and start over
 ```
 
 ---
 
 ## Phase 0 — Bootstrap
+
+### Step 0.0 — Check for existing run state
+
+Before anything else, check for `.bc-fix-state.json` in the current repo root:
+
+```bash
+if [ -f ".bc-fix-state.json" ]; then
+  STATE=$(cat .bc-fix-state.json)
+fi
+```
+
+If the file exists and `--fresh` flag was NOT passed:
+- Parse `state.branch` from the JSON
+- Get current branch: `git branch --show-current`
+- If branches **do not match**: print "State file is from branch '<state.branch>', you are on '<current>'. Starting fresh." and continue with normal flow (the old file will be overwritten at Phase 1).
+- If branches **match** and `state.phase == "fix_loop"`:
+  - Print:
+    ```
+    Resuming previous bc-fix session.
+      Baseline scan:       <state.baselineScanId>
+      Packages complete:   <comma-separated list of packages where state.packages[name].status == "complete">
+      Packages remaining:  <comma-separated list of packages where state.packages[name].status == "pending">
+    ```
+  - Load into working variables:
+    - `$BASELINE_SCAN_ID` = `state.baselineScanId`
+    - `$REPO_ID` = `state.repoId`
+    - `$VIOLATION_ID_MAP` = `state.violationIdMap`
+    - `$FP_NOTES` = `state.fpNotes`
+    - Triage results = `state.triage`
+    - Flags (warnings/auto/local/batch/skipUpload) = from `state.flags` (override with any flags passed at invocation)
+  - **Skip Phase 1 entirely** (scan + violation map already done).
+  - **Skip Phase 2 and Phase 2.5 entirely** (triage already done).
+  - Jump to Phase 3 — but filter the fix plan to only include packages where `state.packages[name].status == "pending"`.
+- If branches **match** and `state.phase == "triage"`:
+  - Print: "Resuming: scan complete, re-running triage."
+  - Load `$BASELINE_SCAN_ID`, `$REPO_ID`, `$VIOLATION_ID_MAP` from state.
+  - Skip Phase 1. Proceed from Phase 2 normally.
+
+**`--fresh` flag:** If `--fresh` is passed, ignore any existing state file and run the full flow from scratch (overwriting the state file at Phase 1).
+
+**Note on gitignore:** When first writing `.bc-fix-state.json` (Step 1.2.5 below), check whether it is already in the target repo's `.gitignore`. If not, append both `.bc-fix-state.json` and `.bc-fix-continuation.md` to `.gitignore`.
 
 ### Step 0.1 — Resolve API key
 
@@ -95,10 +138,11 @@ The key design intent: bc-fix detects it's running on a repo that the GitHub App
 
 Note: The existing `POST /api/repositories` endpoint already handles this case — it creates a new repository record given a valid `githubFullName` for a repo the installation can access. No backend changes needed for auto-activate.
 
-### Step 0.4 — Capture current branch
+### Step 0.4 — Capture current branch and initial commit
 
 ```bash
 CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "local")
+COMMIT_BEFORE=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 ```
 
 ### Step 0.5 — Initialize feedback state
@@ -110,6 +154,10 @@ $VIOLATION_ID_MAP       = {}   # "{filePath}:{lineNumber}:{packageName}:{postcon
 $FP_NOTES              = []   # [{violationId, note}] — scanner shortcomings from FP triage
 $RESOLVED_VIOLATIONS   = []   # [{violationId, resolutionDetail}] — fixed violations
 $SCANNER_ISSUES        = []   # Deduplicated scanner/corpus improvement opportunities
+$TP_COUNT              = 0    # Total true positives across all packages
+$FP_COUNT              = 0    # Total false positives across all packages
+$BORDERLINE_COUNT      = 0    # Total borderline cases across all packages
+$PACKAGES_FIXED        = []   # [{packageName, fixed, fp}] — per-package TP/FP tally
 ```
 
 ---
@@ -186,6 +234,38 @@ Build `$VIOLATION_ID_MAP[key] = dashboardViolation.id`.
 If MCP tools are unavailable (server offline), log "Dashboard feedback will be skipped — MCP server unreachable" and set `SKIP_UPLOAD=true`. Continue with fixes — offline mode still works.
 
 **Note:** `list_packages_with_errors` and `list_errors_for_package` are MCP tools registered on the `behavioral-contracts` server. Call them via the MCP tool interface directly (not curl).
+
+### Step 1.2.5 — Write initial state file
+
+After building `$VIOLATION_ID_MAP`, write `.bc-fix-state.json` to the repo root:
+
+```json
+{
+  "version": "1",
+  "startedAt": "<ISO timestamp>",
+  "branch": "<CURRENT_BRANCH>",
+  "repoId": "<REPO_ID>",
+  "baselineScanId": "<BASELINE_SCAN_ID>",
+  "flags": {
+    "warnings": "<bool — was --warnings passed>",
+    "auto": "<bool — was --auto passed>",
+    "local": "<bool — was --local passed>",
+    "batch": "<bool — was --batch passed>",
+    "skipUpload": "<bool — was --skip-upload passed>"
+  },
+  "phase": "triage",
+  "packages": {
+    "<packageName>": { "status": "pending", "violationCount": "<N>" }
+  },
+  "violationIdMap": "<$VIOLATION_ID_MAP object>"
+}
+```
+
+Also check `.gitignore` — if `.bc-fix-state.json` is not listed, append:
+```
+.bc-fix-state.json
+.bc-fix-continuation.md
+```
 
 ### Step 1.3 — Check if already clean
 
@@ -288,6 +368,19 @@ For each LIKELY FALSE POSITIVE (primary or sub), capture:
 - The exact line(s) that already satisfy the concern
 - **Why the scanner got it wrong** — what pattern did verify-cli fail to detect? What does the corpus contract not cover?
 
+### Step 2.5.2.5 — Update session counters
+
+After labeling all violations (primary + sub), update the session-level counters:
+
+- Increment `$TP_COUNT` by the number of TRUE POSITIVE primary violations
+- Increment `$FP_COUNT` by the number of LIKELY FALSE POSITIVE primary violations
+- Increment `$BORDERLINE_COUNT` by the number of BORDERLINE primary violations
+- For each package group processed, append to `$PACKAGES_FIXED`:
+  ```
+  { packageName: "<pkg>", fixed: <TP count for this pkg>, fp: <FP count for this pkg> }
+  ```
+  (borderline violations count toward `fixed` since they will be fixed)
+
 ### Step 2.5.3 — Present triage results to user
 
 Show the triage table **before** the fix plan:
@@ -376,6 +469,25 @@ batch_review_violations({ violationIds: ["id"], action: "TRUE_POSITIVE", subViol
 This produces a MIXED badge on the dashboard instead of collapsing everything to FALSE_POSITIVE.
 
 5. If a dashboard violation ID is not found in `$VIOLATION_ID_MAP` for a given violation (match failure), skip the feedback call for that violation and log: "No dashboard ID found for <file>:<line>:<package> — skipping feedback".
+
+### Step 2.5.5 — Update state file with triage results
+
+Update `.bc-fix-state.json`: set `phase` to `"fix_loop"` and add triage results:
+
+```json
+{
+  "...existing fields...": "...",
+  "phase": "fix_loop",
+  "triage": {
+    "truePositives": ["<file>:<line>:<package>:<postconditionId>"],
+    "falsePositives": ["<file>:<line>:<package>:<postconditionId>"],
+    "borderline": ["<file>:<line>:<package>:<postconditionId>"]
+  },
+  "fpNotes": [ { "violationId": "<id>", "note": "<scanner shortcoming>" } ]
+}
+```
+
+Read the existing file, merge in the new fields, and overwrite.
 
 ---
 
@@ -486,6 +598,40 @@ EOF
 
 If pre-commit hook fails: fix the hook error, re-stage, create a NEW commit (never amend).
 
+After committing, perform two housekeeping writes:
+
+**4.2a — Update state file:** Read `.bc-fix-state.json`, set `packages["<this package>"].status = "complete"` and `packages["<this package>"].commit = "<git rev-parse --short HEAD>"`, then overwrite the file.
+
+**4.2b — Write continuation file:** Overwrite `.bc-fix-continuation.md` with:
+
+```markdown
+# bc-fix continuation
+
+If this session ran out of context, simply re-run:
+
+    /bc-fix --auto --local --warnings
+
+bc-fix will auto-detect `.bc-fix-state.json` and resume from where it stopped.
+
+---
+
+If the state file was lost, use this manual prompt:
+
+I was running bc-fix and ran out of context. Here's where I left off:
+
+- Branch: <CURRENT_BRANCH>
+- Baseline scan: <BASELINE_SCAN_ID>
+- Completed packages: <package> (commit <sha>), ...
+- Remaining packages: <package> (<N> violations), ...
+
+Triage summary (do not re-triage — use these results):
+<one line per package: "package: N TPs, M FPs, K borderline">
+
+Please continue the fix loop for remaining packages, skipping completed ones.
+```
+
+Update this file after every batch commit so it always reflects current progress.
+
 ### Step 4.3 — Rescan and upload
 
 Trigger a new cloud scan and poll to completion (same procedure as Step 1.1 — use `trigger_scan` then `poll_scan_status` via `/api/mcp`).
@@ -568,6 +714,40 @@ For each package batch in the approved plan:
   ```
 - Do NOT trigger a cloud scan after this commit
 - Do NOT push resolve feedback yet (no new scan ID)
+- After each commit, perform these housekeeping writes (batch mode variants):
+
+  **4.2a — Update state file:** Read `.bc-fix-state.json`, set `packages["<this package>"].status = "complete"` and `packages["<this package>"].commit = "<git rev-parse --short HEAD>"`, then overwrite the file.
+
+  **4.2b — Write continuation file:** Overwrite `.bc-fix-continuation.md` with:
+
+  ```markdown
+  # bc-fix continuation
+
+  If this session ran out of context, simply re-run:
+
+      /bc-fix --auto --local --warnings --batch
+
+  bc-fix will auto-detect `.bc-fix-state.json` and resume from where it stopped.
+  Note: batch mode is active — rescans are deferred to the final verify step.
+
+  ---
+
+  If the state file was lost, use this manual prompt:
+
+  I was running bc-fix in batch mode and ran out of context. Here's where I left off:
+
+  - Branch: <CURRENT_BRANCH>
+  - Baseline scan: <BASELINE_SCAN_ID>
+  - Completed packages: <package> (commit <sha>), ...
+  - Remaining packages: <package> (<N> violations), ...
+
+  Triage summary (do not re-triage — use these results):
+  <one line per package: "package: N TPs, M FPs, K borderline">
+
+  Please continue the fix loop for remaining packages, skipping completed ones.
+  When all packages are fixed, run the final batch scan (Step 4.3).
+  ```
+
 - Continue to next package batch
 
 Print after each commit:
@@ -745,6 +925,61 @@ Write a `bc-triage-report.md` file to the repo root. This file is meant to be sh
 - If `--dry-run` was used and no fixes were applied, note that in the summary
 - If `--skip-upload` was used, omit the "What Was Sent to the Dashboard" section
 
+### Step 5.6 — Submit fix session to dashboard (unless --skip-upload or --dry-run)
+
+After the triage report is written, capture the final commit SHA and submit an aggregate fix session record so the History tab shows a Fix Run badge on the after-scan row.
+
+```bash
+COMMIT_AFTER=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+```
+
+Call `submit_fix_session` MCP tool:
+```bash
+curl -s -X POST $BASE_URL/api/mcp \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"jsonrpc\":\"2.0\",
+    \"method\":\"tools/call\",
+    \"params\":{
+      \"name\":\"submit_fix_session\",
+      \"arguments\":{
+        \"repositoryId\":\"$REPO_ID\",
+        \"scanBeforeId\":\"$BASELINE_SCAN_ID\",
+        \"scanAfterId\":\"$FINAL_SCAN_ID\",
+        \"violationsFixed\":$TP_COUNT,
+        \"fpCount\":$FP_COUNT,
+        \"borderlineCount\":$BORDERLINE_COUNT,
+        \"packagesFixed\":$PACKAGES_FIXED,
+        \"scannerIssues\":$SCANNER_ISSUES,
+        \"branch\":\"$CURRENT_BRANCH\",
+        \"commitBefore\":\"$COMMIT_BEFORE\",
+        \"commitAfter\":\"$COMMIT_AFTER\"
+      }
+    },
+    \"id\":1
+  }"
+```
+
+On success, print:
+```
+Fix session submitted → dashboard History tab will show Fix Run badge on scan $FINAL_SCAN_ID
+```
+
+On failure (tool unavailable or error), log warning and continue — this is non-blocking.
+
+**Note on $PACKAGES_FIXED format:** Must be a JSON array string, e.g.:
+```
+'[{"packageName":"axios","fixed":3,"fp":1},{"packageName":"prisma","fixed":2,"fp":0}]'
+```
+Build this from the per-package tallies accumulated in Step 2.5.2.5. If no packages were processed (all FPs), use `'[]'`.
+
+**Note on $SCANNER_ISSUES format:** Must be a JSON array string of plain strings, e.g.:
+```
+'["verify-cli does not recognise Promise.allSettled() as error boundary","ai corpus api-error-rate-limit fires even with catch block"]'
+```
+Build from the deduplicated `$SCANNER_ISSUES` list. If empty, use `'[]'`.
+
 ---
 
 ## MCP Tool Reference
@@ -767,6 +1002,7 @@ All MCP tools are called via `POST $BASE_URL/api/mcp` with JSON-RPC body:
 | `batch_review_violations` | Phase 2.5.4 — after triage | `violationIds[]`, `action` (TRUE_POSITIVE/FALSE_POSITIVE/FLAG), optional `subViolationIndex` (0-based, for per-postcondition labels) |
 | `add_violation_note` | Phase 2.5.4 — per FP | `violationId`, `note` (scanner shortcoming description) |
 | `resolve_violation` | Step 4.4 — per fixed violation | `violationId`, `resolutionDetail` |
+| `submit_fix_session` | Step 5.6 — aggregate session record | `repositoryId`, `scanBeforeId`, `scanAfterId`, `violationsFixed`, `fpCount`, `borderlineCount`, `packagesFixed`, `scannerIssues`, `branch`, `commitBefore`, `commitAfter` |
 
 ---
 
