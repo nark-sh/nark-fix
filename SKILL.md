@@ -53,6 +53,48 @@ Store as `$BASE_URL`.
 
 Same as bc-scan skill Step 3. Store as `$REPO_ID`.
 
+### Step 0.3.5 — Auto-activate if repo is accessible but not activated (unless --skip-upload)
+
+After resolving `$REPO_ID`:
+
+If `$REPO_ID` is empty or not found (the repo hasn't been activated on the website yet), but the GitHub App is installed (bc-fix can determine this because the scan in Phase 1 will fail with a "not found" error), attempt auto-activation:
+
+```bash
+# Detect owner/repo from git remote
+REMOTE_URL=$(git remote get-url origin 2>/dev/null || echo "")
+# Extract owner/repo from SSH or HTTPS remote URL
+# SSH:   git@github.com:owner/repo.git
+# HTTPS: https://github.com/owner/repo.git
+GITHUB_FULL_NAME=$(echo "$REMOTE_URL" | sed -E 's|.*github\.com[:/]||' | sed 's|\.git$||')
+
+if [ -n "$GITHUB_FULL_NAME" ]; then
+  # Try to auto-activate by calling POST /api/repositories
+  ACTIVATE_RESPONSE=$(curl -s -X POST "$BASE_URL/api/repositories" \
+    -H "Authorization: Bearer $API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"githubFullName\":\"$GITHUB_FULL_NAME\",\"source\":\"bc-fix\"}")
+
+  # Parse new repositoryId from response
+  NEW_REPO_ID=$(echo "$ACTIVATE_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('repository',{}).get('id',''))" 2>/dev/null || echo "")
+
+  if [ -n "$NEW_REPO_ID" ]; then
+    echo "Repository auto-activated on behavioral-contracts.com — ID: $NEW_REPO_ID"
+    REPO_ID=$NEW_REPO_ID
+  else
+    echo "Could not auto-activate: $(echo "$ACTIVATE_RESPONSE" | head -c 200)"
+    echo "Visit $BASE_URL to activate this repository manually."
+    # Continue with --skip-upload behavior
+    SKIP_UPLOAD=true
+  fi
+fi
+```
+
+This runs silently when it succeeds. Only shown to user if activation fails.
+
+The key design intent: bc-fix detects it's running on a repo that the GitHub App has access to (because the API key is valid) but hasn't been connected to the dashboard yet. It auto-connects it by calling the repositories POST endpoint with the `githubFullName` extracted from the git remote. The `source: "bc-fix"` field is passed so the backend can distinguish auto-activations from manual ones (optional logging, no behavior change needed on the API side).
+
+Note: The existing `POST /api/repositories` endpoint already handles this case — it creates a new repository record given a valid `githubFullName` for a repo the installation can access. No backend changes needed for auto-activate.
+
 ### Step 0.4 — Capture current branch
 
 ```bash
