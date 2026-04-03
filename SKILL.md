@@ -1,9 +1,11 @@
 # bc-fix Skill
 
 **Trigger:** `/bc-fix`, "bc fix", "fix behavioral contract violations", "resolve bc violations", "fix bc errors"
-**Version:** 2.0.0
+**Version:** 2.1.0
 
 Agentic loop that scans a repo for behavioral contract violations, triages false positives, pushes TP/FP/resolve feedback to the dashboard via MCP tools, applies DRY fixes package-by-package, and loops until the repo is clean. Each triage decision and fix is recorded in the dashboard for corpus/verify-cli improvement.
+
+**Goal: reach zero violations so the PR gate passes.** When a violation cannot be fixed through code (scanner limitation / Rules of Hooks / intentional design), use `.bc-scan` ignore entries as the resolution path — not leaving violations unaddressed.
 
 ---
 
@@ -16,12 +18,123 @@ Agentic loop that scans a repo for behavioral contract violations, triages false
 /bc-fix --package <name>   # Fix only violations for one package (e.g. axios)
 /bc-fix --skip-upload      # Run locally only, no dashboard upload or MCP feedback
 /bc-fix --local            # Point at http://localhost:3000 instead of production (for saas development)
-/bc-fix --auto             # Fully autonomous: skip all approval gates and prompts, run every package to completion
+/bc-fix --auto             # Fully autonomous: skip all approval gates and prompts, run every package to completion, auto-compact between packages so it can run indefinitely without user intervention
 /bc-fix --batch            # Scan once → fix all → rescan once. No intermediate scans. For automated use.
-/bc-fix --batch --auto     # Fully autonomous batch mode (no approval gate + no intermediate scans)
+/bc-fix --batch --auto     # Fully autonomous batch mode (no approval gate + no intermediate scans + auto-compact)
 /bc-fix --resume            # Explicitly resume from .bc-fix-state.json (same as auto-detection)
 /bc-fix --fresh             # Ignore any existing state file and start over
 ```
+
+---
+
+## Hands-Free / Auto-Compact Operation
+
+`--auto` is the **run-forever** mode. It skips every approval prompt and runs all packages to completion. It also auto-compacts context between packages so a large repo with many packages never needs user intervention to restart.
+
+### How it works
+
+bc-fix already writes `.bc-fix-state.json` after every package batch commit. This file contains everything needed to resume: branch, baseline scan ID, per-package status (pending/complete), and the full violation ID map. Phase 0 reads it automatically on startup and jumps back into the fix loop for remaining packages.
+
+Auto-compact uses this mechanism deliberately:
+
+1. After each package batch commit, state is written to `.bc-fix-state.json`
+2. If the auto-compact trigger fires, the skill calls `/compact` to compress context
+3. On resume, Phase 0 detects the state file, skips Phase 1 (scan) and Phase 2/2.5 (triage), and goes directly to Phase 3 for remaining packages — all without user input
+
+### Auto-compact trigger (--auto mode only)
+
+After each package batch commit, check both conditions:
+
+- **Package cadence:** Every 3rd completed package (`packages_completed_this_session % 3 === 0`)
+- **Violation volume:** Whenever `total_violations_fixed_this_session > 20`
+
+If either condition is true:
+
+1. Confirm `.bc-fix-state.json` is current (it should be — Step 4.2a writes it immediately after commit)
+2. Print:
+   ```
+   [AUTO-COMPACT] <N> packages complete — compacting context. State saved to .bc-fix-state.json.
+   Resume will pick up at: <list of remaining pending packages>
+   ```
+3. Issue `/compact`
+4. On resume: Phase 0 detects `.bc-fix-state.json`, prints the resume banner, loads state, and continues with remaining packages — no user action needed
+
+### Incremental triage report
+
+The final `bc-triage-report.md` (Phase 5.5) is built incrementally: each package's section is appended to the file immediately after that package's batch commit. This means if a compact + resume happens mid-run, the report already has all completed packages and only needs the remaining packages appended at Phase 5.5. The report file is gitignored alongside `.bc-fix-state.json`.
+
+### Recommended invocation for hands-free runs
+
+```bash
+/bc-fix --auto             # Standard mode: scan, triage, fix each package with intermediate rescans
+/bc-fix --auto --batch     # Batch mode: fix all packages, then one final scan (faster, fewer API calls)
+```
+
+Both will run start to finish without requiring any user input or restarts, even on repos with 20+ packages.
+
+---
+
+## Handling Persistent False Positives (Goal: Zero Violations for PR Gate)
+
+The goal of bc-fix is to reach **zero violations** so the PR gate passes. When a violation cannot be eliminated through code changes, there are two resolution mechanisms:
+
+1. **`.bc-suppressions.json`** — commit-tracked suppression by fingerprint. The correct tool for persistent FPs that the whole team should share. No source file changes needed.
+2. **Dashboard FALSE_POSITIVE label** — marks a violation as reviewed on the dashboard. Labels carry forward scan-to-scan via fingerprint matching.
+
+**Use `.bc-suppressions.json` first** — it's commit-tracked (visible in PR diffs), shared across all team members, and works with the cloud scanner and local CLI identically.
+
+### `.bc-suppressions.json` format
+
+```json
+{
+  "version": "1.0",
+  "suppressions": [
+    {
+      "fingerprint": "51e2462ed848e6bad93773eccb456163",
+      "package": "react-hook-form",
+      "postconditionId": "missing-form-provider",
+      "filePath": "components/Input.tsx",
+      "lineNumber": 38,
+      "reason": "useFormContext() called unconditionally per Rules of Hooks. hookToForm prop defaults false; all usage is null-guarded via isFullyHooked check.",
+      "suppressedAt": "2026-04-02T00:00:00Z"
+    }
+  ]
+}
+```
+
+**Every suppression requires a `reason`** — this is the audit trail for code review.
+
+### How to get fingerprints
+
+The fingerprint for each violation is returned in `list_errors_for_package` results as the `fingerprint` field. Read it directly from the MCP response — no CLI needed.
+
+### When to use suppression vs. code fix
+
+| Situation | Resolution |
+|-----------|-----------|
+| Error state is genuinely unhandled | Fix the code (add try-catch, expose `error`, add `onError`) |
+| Error is handled by graceful degradation the scanner can't detect | Fix the code if trivial (1–2 lines, e.g. add `error` to destructuring); else suppress |
+| Hook must be called unconditionally (Rules of Hooks), usage is null-guarded | Add to `.bc-suppressions.json` |
+| Architectural pattern is intentional (optional FormProvider, optional context) | Add to `.bc-suppressions.json` |
+| Violation is in generated/vendored code | Add to `.bc-suppressions.json` |
+| After a code fix the scanner still flags the same site due to a language constraint | Add to `.bc-suppressions.json` for the residual |
+
+### Suppression workflow in bc-fix
+
+In Phase 2.5, when a violation is labeled LIKELY FALSE POSITIVE and a code fix is not appropriate:
+
+1. Read the violation's `fingerprint` from `list_errors_for_package` response
+2. Read or create `.bc-suppressions.json` at repo root
+3. Add a suppression entry with the fingerprint, reason, and all metadata fields
+4. `git add .bc-suppressions.json` and include it in the batch commit
+5. After the commit, trigger a rescan — suppressed violations will not appear in the next scan results
+6. Also call `batch_review_violations` with `action: "FALSE_POSITIVE"` for the dashboard label (belt-and-suspenders)
+
+**Stale suppressions are cleaned automatically** after each scan — if the violation is fixed or the code moves, the suppression is removed from `.bc-suppressions.json` automatically. You never need to manually audit it.
+
+### Dashboard FALSE_POSITIVE label
+
+Use in addition to `.bc-suppressions.json` (belt-and-suspenders), OR alone when you can't commit (e.g. a temp workaround). Labels carry forward via fingerprint matching scan-to-scan, but are not visible in PR diffs. Prefer `.bc-suppressions.json` for the team-visible audit trail.
 
 ---
 
@@ -632,6 +745,22 @@ Please continue the fix loop for remaining packages, skipping completed ones.
 
 Update this file after every batch commit so it always reflects current progress.
 
+**4.2c — Append to incremental triage report:** After each package batch commit, append that package's section to `bc-triage-report.md` (create if it doesn't exist). Use the same format as Phase 5.5 but for this package only. This ensures partial results survive a compact + resume cycle. Mark the file as gitignored alongside `.bc-fix-state.json` if not already.
+
+**4.2d — Auto-compact (--auto mode only):** After the state file, continuation file, and triage report are current, check auto-compact trigger:
+
+- Condition A: `packages_completed_this_session % 3 === 0` (every 3rd package)
+- Condition B: `total_violations_fixed_this_session > 20`
+
+If either condition is true:
+1. Print:
+   ```
+   [AUTO-COMPACT] <N> packages complete — compacting context. State saved to .bc-fix-state.json.
+   Remaining: <list of pending package names>
+   ```
+2. Issue `/compact` to compress context
+3. On resume: Phase 0 detects `.bc-fix-state.json`, prints the resume banner, and continues with remaining pending packages — no user action needed
+
 ### Step 4.3 — Rescan and upload
 
 Trigger a new cloud scan and poll to completion (same procedure as Step 1.1 — use `trigger_scan` then `poll_scan_status` via `/api/mcp`).
@@ -747,6 +876,13 @@ For each package batch in the approved plan:
   Please continue the fix loop for remaining packages, skipping completed ones.
   When all packages are fixed, run the final batch scan (Step 4.3).
   ```
+
+  **4.2c — Append to incremental triage report:** Append this package's section to `bc-triage-report.md` (create if it doesn't exist, gitignore alongside `.bc-fix-state.json`). Same format as Phase 5.5 but for this package only.
+
+  **4.2d — Auto-compact (--auto mode only):** After state file, continuation file, and triage report are current:
+  - Trigger if: `packages_completed_this_session % 3 === 0` OR `total_violations_fixed_this_session > 20`
+  - Print: `[AUTO-COMPACT] <N> packages complete — compacting. State saved to .bc-fix-state.json. Remaining: <list>`
+  - Issue `/compact`. On resume, Phase 0 reads state and continues from next pending package automatically.
 
 - Continue to next package batch
 
@@ -1014,7 +1150,7 @@ All MCP tools are called via `POST $BASE_URL/api/mcp` with JSON-RPC body:
 - Never use `catch (e: any)` — use `unknown` + type narrowing
 - Never silently swallow errors — always log or rethrow
 - Never create a shared utility if only one package benefits
-- Never skip the approval gate (Phase 3)
+- Never skip the approval gate (Phase 3) unless `--auto` is passed — that flag explicitly enables hands-free operation
 - Never commit with `git add -A` — stage specific files only
 - Never amend commits
 - Never force-push
