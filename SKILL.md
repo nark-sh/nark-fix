@@ -1,9 +1,9 @@
-# bc-fix Skill
+# nark-fix Skill
 
-**Trigger:** `/bc-fix`, "bc fix", "fix behavioral contract violations", "resolve bc violations", "fix bc errors"
+**Trigger:** `/nark-fix`, "nark fix", "fix Nark profile violations", "resolve nark violations", "fix nark errors"
 **Version:** 2.1.0
 
-Agentic loop that scans a repo for behavioral contract violations, triages false positives, pushes TP/FP/resolve feedback to the dashboard via MCP tools, applies DRY fixes package-by-package, and loops until the repo is clean. Each triage decision and fix is recorded in the dashboard for corpus/verify-cli improvement.
+Agentic loop that scans a repo for Nark profile violations, triages false positives, pushes TP/FP/resolve feedback to the dashboard via MCP tools, applies DRY fixes package-by-package, and loops until the repo is clean. Each triage decision and fix is recorded in the dashboard for corpus/verify-cli improvement.
 
 **Goal: reach zero violations so the PR gate passes.** When a violation cannot be fixed through code (scanner limitation / Rules of Hooks / intentional design), use `.bc-scan` ignore entries as the resolution path — not leaving violations unaddressed.
 
@@ -12,17 +12,17 @@ Agentic loop that scans a repo for behavioral contract violations, triages false
 ## Invocation
 
 ```
-/bc-fix                    # Scan + analyze + fix all ERRORs
-/bc-fix --warnings         # Also fix WARNINGs (default: ERRORs only)
-/bc-fix --dry-run          # Scan + show plan, but make no changes
-/bc-fix --package <name>   # Fix only violations for one package (e.g. axios)
-/bc-fix --skip-upload      # Run locally only, no dashboard upload or MCP feedback
-/bc-fix --local            # Point at http://localhost:3000 instead of production (for saas development)
-/bc-fix --auto             # Fully autonomous: skip all approval gates and prompts, run every package to completion, auto-compact between packages so it can run indefinitely without user intervention
-/bc-fix --batch            # Scan once → fix all → rescan once. No intermediate scans. For automated use.
-/bc-fix --batch --auto     # Fully autonomous batch mode (no approval gate + no intermediate scans + auto-compact)
-/bc-fix --resume            # Explicitly resume from .bc-fix-state.json (same as auto-detection)
-/bc-fix --fresh             # Ignore any existing state file and start over
+/nark-fix                    # Scan + analyze + fix all ERRORs
+/nark-fix --warnings         # Also fix WARNINGs (default: ERRORs only)
+/nark-fix --dry-run          # Scan + show plan, but make no changes
+/nark-fix --package <name>   # Fix only violations for one package (e.g. axios)
+/nark-fix --skip-upload      # Run locally only, no dashboard upload or MCP feedback
+/nark-fix --local            # Point at http://localhost:3000 instead of production (for saas development)
+/nark-fix --auto             # Fully autonomous: skip all approval gates and prompts, run every package to completion, auto-compact between packages so it can run indefinitely without user intervention
+/nark-fix --batch            # Scan once → fix all → rescan once. No intermediate scans. For automated use.
+/nark-fix --batch --auto     # Fully autonomous batch mode (no approval gate + no intermediate scans + auto-compact)
+/nark-fix --resume            # Explicitly resume from .nark/fix-state.json (same as auto-detection)
+/nark-fix --fresh             # Ignore any existing state file and start over
 ```
 
 ---
@@ -33,11 +33,11 @@ Agentic loop that scans a repo for behavioral contract violations, triages false
 
 ### How it works
 
-bc-fix already writes `.bc-fix-state.json` after every package batch commit. This file contains everything needed to resume: branch, baseline scan ID, per-package status (pending/complete), and the full violation ID map. Phase 0 reads it automatically on startup and jumps back into the fix loop for remaining packages.
+nark-fix already writes `.nark/fix-state.json` after every package batch commit. This file contains everything needed to resume: branch, baseline scan ID, per-package status (pending/complete), and the full violation ID map. Phase 0 reads it automatically on startup and jumps back into the fix loop for remaining packages.
 
 Auto-compact uses this mechanism deliberately:
 
-1. After each package batch commit, state is written to `.bc-fix-state.json`
+1. After each package batch commit, state is written to `.nark/fix-state.json`
 2. If the auto-compact trigger fires, the skill calls `/compact` to compress context
 3. On resume, Phase 0 detects the state file, skips Phase 1 (scan) and Phase 2/2.5 (triage), and goes directly to Phase 3 for remaining packages — all without user input
 
@@ -50,24 +50,24 @@ After each package batch commit, check both conditions:
 
 If either condition is true:
 
-1. Confirm `.bc-fix-state.json` is current (it should be — Step 4.2a writes it immediately after commit)
+1. Confirm `.nark/fix-state.json` is current (it should be — Step 4.2a writes it immediately after commit)
 2. Print:
    ```
-   [AUTO-COMPACT] <N> packages complete — compacting context. State saved to .bc-fix-state.json.
+   [AUTO-COMPACT] <N> packages complete — compacting context. State saved to .nark/fix-state.json.
    Resume will pick up at: <list of remaining pending packages>
    ```
 3. Issue `/compact`
-4. On resume: Phase 0 detects `.bc-fix-state.json`, prints the resume banner, loads state, and continues with remaining packages — no user action needed
+4. On resume: Phase 0 detects `.nark/fix-state.json`, prints the resume banner, loads state, and continues with remaining packages — no user action needed
 
 ### Incremental triage report
 
-The final `bc-triage-report.md` (Phase 5.5) is built incrementally: each package's section is appended to the file immediately after that package's batch commit. This means if a compact + resume happens mid-run, the report already has all completed packages and only needs the remaining packages appended at Phase 5.5. The report file is gitignored alongside `.bc-fix-state.json`.
+The final `.nark/triage-report.md` (Phase 5.5) is built incrementally: each package's section is appended to the file immediately after that package's batch commit. This means if a compact + resume happens mid-run, the report already has all completed packages and only needs the remaining packages appended at Phase 5.5. The report file is gitignored alongside `.nark/fix-state.json`.
 
 ### Recommended invocation for hands-free runs
 
 ```bash
-/bc-fix --auto             # Standard mode: scan, triage, fix each package with intermediate rescans
-/bc-fix --auto --batch     # Batch mode: fix all packages, then one final scan (faster, fewer API calls)
+/nark-fix --auto             # Standard mode: scan, triage, fix each package with intermediate rescans
+/nark-fix --auto --batch     # Batch mode: fix all packages, then one final scan (faster, fewer API calls)
 ```
 
 Both will run start to finish without requiring any user input or restarts, even on repos with 20+ packages.
@@ -76,7 +76,7 @@ Both will run start to finish without requiring any user input or restarts, even
 
 ## Handling Persistent False Positives (Goal: Zero Violations for PR Gate)
 
-The goal of bc-fix is to reach **zero violations** so the PR gate passes. When a violation cannot be eliminated through code changes, there are two resolution mechanisms:
+The goal of nark-fix is to reach **zero violations** so the PR gate passes. When a violation cannot be eliminated through code changes, there are two resolution mechanisms:
 
 1. **`.bc-suppressions.json`** — commit-tracked suppression by fingerprint. The correct tool for persistent FPs that the whole team should share. No source file changes needed.
 2. **Dashboard FALSE_POSITIVE label** — marks a violation as reviewed on the dashboard. Labels carry forward scan-to-scan via fingerprint matching.
@@ -119,7 +119,7 @@ The fingerprint for each violation is returned in `list_errors_for_package` resu
 | Violation is in generated/vendored code | Add to `.bc-suppressions.json` |
 | After a code fix the scanner still flags the same site due to a language constraint | Add to `.bc-suppressions.json` for the residual |
 
-### Suppression workflow in bc-fix
+### Suppression workflow in nark-fix
 
 In Phase 2.5, when a violation is labeled LIKELY FALSE POSITIVE and a code fix is not appropriate:
 
@@ -142,11 +142,11 @@ Use in addition to `.bc-suppressions.json` (belt-and-suspenders), OR alone when 
 
 ### Step 0.0 — Check for existing run state
 
-Before anything else, check for `.bc-fix-state.json` in the current repo root:
+Before anything else, check for `.nark/fix-state.json` in the current repo root:
 
 ```bash
-if [ -f ".bc-fix-state.json" ]; then
-  STATE=$(cat .bc-fix-state.json)
+if [ -f ".nark/fix-state.json" ]; then
+  STATE=$(cat .nark/fix-state.json)
 fi
 ```
 
@@ -157,7 +157,7 @@ If the file exists and `--fresh` flag was NOT passed:
 - If branches **match** and `state.phase == "fix_loop"`:
   - Print:
     ```
-    Resuming previous bc-fix session.
+    Resuming previous nark-fix session.
       Baseline scan:       <state.baselineScanId>
       Packages complete:   <comma-separated list of packages where state.packages[name].status == "complete">
       Packages remaining:  <comma-separated list of packages where state.packages[name].status == "pending">
@@ -166,6 +166,7 @@ If the file exists and `--fresh` flag was NOT passed:
     - `$BASELINE_SCAN_ID` = `state.baselineScanId`
     - `$REPO_ID` = `state.repoId`
     - `$VIOLATION_ID_MAP` = `state.violationIdMap`
+    - `$QUEUE_ID_MAP` = `state.queueIdMap` (may be empty if session was pre-queue-fix)
     - `$FP_NOTES` = `state.fpNotes`
     - Triage results = `state.triage`
     - Flags (warnings/auto/local/batch/skipUpload) = from `state.flags` (override with any flags passed at invocation)
@@ -179,17 +180,17 @@ If the file exists and `--fresh` flag was NOT passed:
 
 **`--fresh` flag:** If `--fresh` is passed, ignore any existing state file and run the full flow from scratch (overwriting the state file at Phase 1).
 
-**Note on gitignore:** When first writing `.bc-fix-state.json` (Step 1.2.5 below), check whether it is already in the target repo's `.gitignore`. If not, append both `.bc-fix-state.json` and `.bc-fix-continuation.md` to `.gitignore`.
+**Note on gitignore:** When first writing `.nark/fix-state.json` (Step 1.2.5 below), check whether it is already in the target repo's `.gitignore`. If not, append both `.nark/fix-state.json` and `.nark/fix-continuation.md` to `.gitignore`.
 
 ### Step 0.1 — Resolve API key
 
 Check in order:
-1. `$BC_API_KEY` environment variable
-2. `cat ~/.claude.json 2>/dev/null` → parse `projects.<cwd>.mcpServers["behavioral-contracts"].headers.Authorization` → strip `"Bearer "` prefix
-3. `cat ~/.claude.json 2>/dev/null` → parse top-level `mcpServers["behavioral-contracts"].headers.Authorization`
+1. `$NARK_API_KEY` environment variable
+2. `cat ~/.claude.json 2>/dev/null` → parse `projects.<cwd>.mcpServers["nark"].headers.Authorization` → strip `"Bearer "` prefix
+3. `cat ~/.claude.json 2>/dev/null` → parse top-level `mcpServers["nark"].headers.Authorization`
 4. `cat ~/.claude/claude_desktop_config.json 2>/dev/null` → same path
 
-If no key found and `--skip-upload` not set: tell the user "API key not found. Set BC_API_KEY or configure MCP with: claude mcp add --transport http behavioral-contracts <url> --header 'Authorization: Bearer <key>' --scope user". Stop.
+If no key found and `--skip-upload` not set: tell the user "API key not found. Set NARK_API_KEY or configure MCP with: claude mcp add --transport http nark <url> --header 'Authorization: Bearer <key>' --scope user". Stop.
 
 Store as `$API_KEY`.
 
@@ -199,7 +200,7 @@ Resolve in priority order:
 1. `--local` flag passed at invocation → use `http://localhost:3000`
 2. `.bc-scan` config file `baseUrl` field
 3. `$BC_BASE_URL` environment variable
-4. Default: `https://app.behavioral-contracts.com`
+4. Default: `https://app.nark.sh`
 
 When `--local` is set, also resolve the API key from the local dev `.env` or `.env.local` file in the saas app if the standard key lookup (Step 0.1) fails — local dev keys may differ from production keys.
 
@@ -207,13 +208,13 @@ Store as `$BASE_URL`.
 
 ### Step 0.3 — Resolve repository ID
 
-Same as bc-scan skill Step 3. Store as `$REPO_ID`.
+Resolve the repository ID from the MCP `list_repositories` tool, matching by GitHub remote URL. Store as `$REPO_ID`.
 
 ### Step 0.3.5 — Auto-activate if repo is accessible but not activated (unless --skip-upload)
 
 After resolving `$REPO_ID`:
 
-If `$REPO_ID` is empty or not found (the repo hasn't been activated on the website yet), but the GitHub App is installed (bc-fix can determine this because the scan in Phase 1 will fail with a "not found" error), attempt auto-activation:
+If `$REPO_ID` is empty or not found (the repo hasn't been activated on the website yet), but the GitHub App is installed (nark-fix can determine this because the scan in Phase 1 will fail with a "not found" error), attempt auto-activation:
 
 ```bash
 # Detect owner/repo from git remote
@@ -228,13 +229,13 @@ if [ -n "$GITHUB_FULL_NAME" ]; then
   ACTIVATE_RESPONSE=$(curl -s -X POST "$BASE_URL/api/repositories" \
     -H "Authorization: Bearer $API_KEY" \
     -H "Content-Type: application/json" \
-    -d "{\"githubFullName\":\"$GITHUB_FULL_NAME\",\"source\":\"bc-fix\"}")
+    -d "{\"githubFullName\":\"$GITHUB_FULL_NAME\",\"source\":\"nark-fix\"}")
 
   # Parse new repositoryId from response
   NEW_REPO_ID=$(echo "$ACTIVATE_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('repository',{}).get('id',''))" 2>/dev/null || echo "")
 
   if [ -n "$NEW_REPO_ID" ]; then
-    echo "Repository auto-activated on behavioral-contracts.com — ID: $NEW_REPO_ID"
+    echo "Repository auto-activated on nark.sh — ID: $NEW_REPO_ID"
     REPO_ID=$NEW_REPO_ID
   else
     echo "Could not auto-activate: $(echo "$ACTIVATE_RESPONSE" | head -c 200)"
@@ -247,7 +248,7 @@ fi
 
 This runs silently when it succeeds. Only shown to user if activation fails.
 
-The key design intent: bc-fix detects it's running on a repo that the GitHub App has access to (because the API key is valid) but hasn't been connected to the dashboard yet. It auto-connects it by calling the repositories POST endpoint with the `githubFullName` extracted from the git remote. The `source: "bc-fix"` field is passed so the backend can distinguish auto-activations from manual ones (optional logging, no behavior change needed on the API side).
+The key design intent: nark-fix detects it's running on a repo that the GitHub App has access to (because the API key is valid) but hasn't been connected to the dashboard yet. It auto-connects it by calling the repositories POST endpoint with the `githubFullName` extracted from the git remote. The `source: "nark-fix"` field is passed so the backend can distinguish auto-activations from manual ones (optional logging, no behavior change needed on the API side).
 
 Note: The existing `POST /api/repositories` endpoint already handles this case — it creates a new repository record given a valid `githubFullName` for a repo the installation can access. No backend changes needed for auto-activate.
 
@@ -264,6 +265,7 @@ Create an in-memory (working notes) structure to track across the full session:
 
 ```
 $VIOLATION_ID_MAP       = {}   # "{filePath}:{lineNumber}:{packageName}:{postconditionId}" → dashboardViolationId
+$QUEUE_ID_MAP          = {}   # dashboardViolationId → queueId (from queue_fix response)
 $FP_NOTES              = []   # [{violationId, note}] — scanner shortcomings from FP triage
 $RESOLVED_VIOLATIONS   = []   # [{violationId, resolutionDetail}] — fixed violations
 $SCANNER_ISSUES        = []   # Deduplicated scanner/corpus improvement opportunities
@@ -346,11 +348,11 @@ Build `$VIOLATION_ID_MAP[key] = dashboardViolation.id`.
 
 If MCP tools are unavailable (server offline), log "Dashboard feedback will be skipped — MCP server unreachable" and set `SKIP_UPLOAD=true`. Continue with fixes — offline mode still works.
 
-**Note:** `list_packages_with_errors` and `list_errors_for_package` are MCP tools registered on the `behavioral-contracts` server. Call them via the MCP tool interface directly (not curl).
+**Note:** `list_packages_with_errors` and `list_errors_for_package` are MCP tools registered on the `nark` server. Call them via the MCP tool interface directly (not curl).
 
 ### Step 1.2.5 — Write initial state file
 
-After building `$VIOLATION_ID_MAP`, write `.bc-fix-state.json` to the repo root:
+After building `$VIOLATION_ID_MAP`, write `.nark/fix-state.json` to the repo root:
 
 ```json
 {
@@ -370,14 +372,17 @@ After building `$VIOLATION_ID_MAP`, write `.bc-fix-state.json` to the repo root:
   "packages": {
     "<packageName>": { "status": "pending", "violationCount": "<N>" }
   },
-  "violationIdMap": "<$VIOLATION_ID_MAP object>"
+  "violationIdMap": "<$VIOLATION_ID_MAP object>",
+  "queueIdMap": {}
 }
 ```
 
-Also check `.gitignore` — if `.bc-fix-state.json` is not listed, append:
+// `queueIdMap` is populated during Phase 2.5.4 — maps dashboardViolationId → queueId
+
+Also check `.gitignore` — if `.nark/fix-state.json` is not listed, append:
 ```
-.bc-fix-state.json
-.bc-fix-continuation.md
+.nark/fix-state.json
+.nark/fix-continuation.md
 ```
 
 ### Step 1.3 — Check if already clean
@@ -535,6 +540,16 @@ After completing triage, push labels in two passes: **primary violations first, 
    }
    ```
 
+1a. **Queue TRUE POSITIVES for agent** — after batch_review_violations TRUE_POSITIVE succeeds, call `queue_fix` once per TP violation:
+    ```
+    Arguments: {
+      violationId: <dashboard violation ID from $VIOLATION_ID_MAP>,
+      note: "Queued by nark-fix for automated repair"
+    }
+    ```
+    Parse the returned `queueId` from the response. Store in `$QUEUE_ID_MAP[dashboardViolationId] = queueId`.
+    If queue_fix fails or MCP is unreachable, log "queue_fix unavailable — skipping queue" and continue without queueId. The fix loop proceeds normally.
+
 2. **LIKELY FALSE POSITIVES** — call `batch_review_violations` MCP tool:
    ```
    Arguments: {
@@ -585,7 +600,7 @@ This produces a MIXED badge on the dashboard instead of collapsing everything to
 
 ### Step 2.5.5 — Update state file with triage results
 
-Update `.bc-fix-state.json`: set `phase` to `"fix_loop"` and add triage results:
+Update `.nark/fix-state.json`: set `phase` to `"fix_loop"` and add triage results:
 
 ```json
 {
@@ -609,7 +624,7 @@ Read the existing file, merge in the new fields, and overwrite.
 Before writing any code, present the full plan to the user. Format:
 
 ```
-Behavioral Contracts — Fix Plan
+Nark — Fix Plan
 ═══════════════════════════════════════════════════════════
 
 Branch:    <$CURRENT_BRANCH>
@@ -713,24 +728,24 @@ If pre-commit hook fails: fix the hook error, re-stage, create a NEW commit (nev
 
 After committing, perform two housekeeping writes:
 
-**4.2a — Update state file:** Read `.bc-fix-state.json`, set `packages["<this package>"].status = "complete"` and `packages["<this package>"].commit = "<git rev-parse --short HEAD>"`, then overwrite the file.
+**4.2a — Update state file:** Read `.nark/fix-state.json`, set `packages["<this package>"].status = "complete"` and `packages["<this package>"].commit = "<git rev-parse --short HEAD>"`, then overwrite the file.
 
-**4.2b — Write continuation file:** Overwrite `.bc-fix-continuation.md` with:
+**4.2b — Write continuation file:** Overwrite `.nark/fix-continuation.md` with:
 
 ```markdown
-# bc-fix continuation
+# nark-fix continuation
 
 If this session ran out of context, simply re-run:
 
-    /bc-fix --auto --local --warnings
+    /nark-fix --auto --local --warnings
 
-bc-fix will auto-detect `.bc-fix-state.json` and resume from where it stopped.
+nark-fix will auto-detect `.nark/fix-state.json` and resume from where it stopped.
 
 ---
 
 If the state file was lost, use this manual prompt:
 
-I was running bc-fix and ran out of context. Here's where I left off:
+I was running nark-fix and ran out of context. Here's where I left off:
 
 - Branch: <CURRENT_BRANCH>
 - Baseline scan: <BASELINE_SCAN_ID>
@@ -745,7 +760,7 @@ Please continue the fix loop for remaining packages, skipping completed ones.
 
 Update this file after every batch commit so it always reflects current progress.
 
-**4.2c — Append to incremental triage report:** After each package batch commit, append that package's section to `bc-triage-report.md` (create if it doesn't exist). Use the same format as Phase 5.5 but for this package only. This ensures partial results survive a compact + resume cycle. Mark the file as gitignored alongside `.bc-fix-state.json` if not already.
+**4.2c — Append to incremental triage report:** After each package batch commit, append that package's section to `.nark/triage-report.md` (create if it doesn't exist). Use the same format as Phase 5.5 but for this package only. This ensures partial results survive a compact + resume cycle. Mark the file as gitignored alongside `.nark/fix-state.json` if not already.
 
 **4.2d — Auto-compact (--auto mode only):** After the state file, continuation file, and triage report are current, check auto-compact trigger:
 
@@ -755,11 +770,11 @@ Update this file after every batch commit so it always reflects current progress
 If either condition is true:
 1. Print:
    ```
-   [AUTO-COMPACT] <N> packages complete — compacting context. State saved to .bc-fix-state.json.
+   [AUTO-COMPACT] <N> packages complete — compacting context. State saved to .nark/fix-state.json.
    Remaining: <list of pending package names>
    ```
 2. Issue `/compact` to compress context
-3. On resume: Phase 0 detects `.bc-fix-state.json`, prints the resume banner, and continues with remaining pending packages — no user action needed
+3. On resume: Phase 0 detects `.nark/fix-state.json`, prints the resume banner, and continues with remaining pending packages — no user action needed
 
 ### Step 4.3 — Rescan and upload
 
@@ -786,15 +801,37 @@ Batch <N> complete
 
 ### Step 4.4 — Push resolve feedback to dashboard (unless --skip-upload)
 
-For each violation fixed in this batch, call `resolve_violation` MCP tool:
+For each violation fixed in this batch, push resolve feedback using the appropriate tool:
+
+**When queueId is available** (stored in `$QUEUE_ID_MAP` for this violation) — call `mark_fixed` MCP tool:
+```
+Arguments: {
+  queueId: <$QUEUE_ID_MAP[violationId]>,
+  resolution: "<what was done: e.g. 'Wrapped axios.get call in try-catch with axios.isAxiosError type guard. Error is logged then rethrown to preserve caller handling.'>",
+  resolveViolation: true
+}
+```
+`mark_fixed` with `resolveViolation: true` closes the queue item AND writes the RESOLVE review in one call. Do NOT also call `resolve_violation` — that would double-write.
+
+**Fallback when no queueId** (mid-session additions, violations added after initial triage) — call `resolve_violation` MCP tool:
 ```
 Arguments: {
   violationId: <dashboard violation ID from $VIOLATION_ID_MAP>,
-  resolutionDetail: "<what was done: e.g. 'Wrapped axios.get call in try-catch with axios.isAxiosError type guard. Error is logged then rethrown to preserve caller handling.'>"
+  resolutionDetail: "<what was done>"
 }
 ```
 
 Call individually (not batch) to provide rich per-violation detail. If the dashboard violation ID is not in `$VIOLATION_ID_MAP`, skip and log.
+
+**For violations that go to .bc-suppressions.json or are genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
+```
+Arguments: {
+  queueId: <$QUEUE_ID_MAP[violationId]>,
+  resolution: "Cannot fix: <reason>. Added to .bc-suppressions.json ignore.",
+  resolveViolation: false
+}
+```
+This closes the queue item without writing a RESOLVE review (the suppression is the resolution path).
 
 ### Step 4.5 — Check for regressions or unexpected violations
 
@@ -845,25 +882,25 @@ For each package batch in the approved plan:
 - Do NOT push resolve feedback yet (no new scan ID)
 - After each commit, perform these housekeeping writes (batch mode variants):
 
-  **4.2a — Update state file:** Read `.bc-fix-state.json`, set `packages["<this package>"].status = "complete"` and `packages["<this package>"].commit = "<git rev-parse --short HEAD>"`, then overwrite the file.
+  **4.2a — Update state file:** Read `.nark/fix-state.json`, set `packages["<this package>"].status = "complete"` and `packages["<this package>"].commit = "<git rev-parse --short HEAD>"`, then overwrite the file.
 
-  **4.2b — Write continuation file:** Overwrite `.bc-fix-continuation.md` with:
+  **4.2b — Write continuation file:** Overwrite `.nark/fix-continuation.md` with:
 
   ```markdown
-  # bc-fix continuation
+  # nark-fix continuation
 
   If this session ran out of context, simply re-run:
 
-      /bc-fix --auto --local --warnings --batch
+      /nark-fix --auto --local --warnings --batch
 
-  bc-fix will auto-detect `.bc-fix-state.json` and resume from where it stopped.
+  nark-fix will auto-detect `.nark/fix-state.json` and resume from where it stopped.
   Note: batch mode is active — rescans are deferred to the final verify step.
 
   ---
 
   If the state file was lost, use this manual prompt:
 
-  I was running bc-fix in batch mode and ran out of context. Here's where I left off:
+  I was running nark-fix in batch mode and ran out of context. Here's where I left off:
 
   - Branch: <CURRENT_BRANCH>
   - Baseline scan: <BASELINE_SCAN_ID>
@@ -877,11 +914,11 @@ For each package batch in the approved plan:
   When all packages are fixed, run the final batch scan (Step 4.3).
   ```
 
-  **4.2c — Append to incremental triage report:** Append this package's section to `bc-triage-report.md` (create if it doesn't exist, gitignore alongside `.bc-fix-state.json`). Same format as Phase 5.5 but for this package only.
+  **4.2c — Append to incremental triage report:** Append this package's section to `.nark/triage-report.md` (create if it doesn't exist, gitignore alongside `.nark/fix-state.json`). Same format as Phase 5.5 but for this package only.
 
   **4.2d — Auto-compact (--auto mode only):** After state file, continuation file, and triage report are current:
   - Trigger if: `packages_completed_this_session % 3 === 0` OR `total_violations_fixed_this_session > 20`
-  - Print: `[AUTO-COMPACT] <N> packages complete — compacting. State saved to .bc-fix-state.json. Remaining: <list>`
+  - Print: `[AUTO-COMPACT] <N> packages complete — compacting. State saved to .nark/fix-state.json. Remaining: <list>`
   - Issue `/compact`. On resume, Phase 0 reads state and continues from next pending package automatically.
 
 - Continue to next package batch
@@ -903,7 +940,38 @@ Trigger ONE cloud scan (same as Step 1.1 — use `trigger_scan` then `poll_scan_
 
 ### Step 4.4 — Push all resolve feedback
 
-For every violation that was fixed across ALL batches, call `resolve_violation` MCP tool.
+For every violation that was fixed across ALL batches, push resolve feedback using the appropriate tool:
+
+**When queueId is available** (stored in `$QUEUE_ID_MAP` for this violation) — call `mark_fixed` MCP tool:
+```
+Arguments: {
+  queueId: <$QUEUE_ID_MAP[violationId]>,
+  resolution: "<what was done>",
+  resolveViolation: true
+}
+```
+`mark_fixed` with `resolveViolation: true` closes the queue item AND writes the RESOLVE review in one call. Do NOT also call `resolve_violation` — that would double-write.
+
+**Fallback when no queueId** (mid-session additions, violations added after initial triage) — call `resolve_violation` MCP tool:
+```
+Arguments: {
+  violationId: <dashboard violation ID from $VIOLATION_ID_MAP>,
+  resolutionDetail: "<what was done>"
+}
+```
+
+Call individually (not batch) to provide rich per-violation detail. If the dashboard violation ID is not in `$VIOLATION_ID_MAP`, skip and log.
+
+**For violations that go to .bc-suppressions.json or are genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
+```
+Arguments: {
+  queueId: <$QUEUE_ID_MAP[violationId]>,
+  resolution: "Cannot fix: <reason>. Added to .bc-suppressions.json ignore.",
+  resolveViolation: false
+}
+```
+This closes the queue item without writing a RESOLVE review (the suppression is the resolution path).
+
 Call `batch_review_violations` for the initial triage labels (TP/FP/FLAG) if not yet pushed.
 Use the new final scan ID for any scan-scoped feedback.
 
@@ -938,7 +1006,7 @@ Trigger one final cloud scan (same as Step 1.1 — use `trigger_scan` then `poll
 ### Step 5.3 — Report
 
 ```
-Behavioral Contracts — Fix Complete
+Nark — Fix Complete
 ═══════════════════════════════════════════════════════════
 
 Branch:    <$CURRENT_BRANCH>
@@ -986,14 +1054,14 @@ If zero issues: "No scanner false positives detected — corpus coverage looks g
 
 ### Step 5.5 — Triage Report
 
-Write a `bc-triage-report.md` file to the repo root. This file is meant to be shared with other developers and the corpus team. It should be comprehensive and standalone.
+Write a `.nark/triage-report.md` file to the repo root. This file is meant to be shared with other developers and the corpus team. It should be comprehensive and standalone.
 
-**File path:** `<repo root>/bc-triage-report.md`
+**File path:** `<repo root>/.nark/triage-report.md`
 
 **Content structure:**
 
 ```markdown
-# Behavioral Contracts Triage Report
+# Nark Triage Report
 **Repository:** <githubFullName or local path>
 **Branch:** <branch> @ <commitSha>
 **Scan ID:** <BASELINE_SCAN_ID> → <FINAL_SCAN_ID>
@@ -1051,7 +1119,7 @@ Write a `bc-triage-report.md` file to the repo root. This file is meant to be sh
 
 ---
 
-*Generated by Behavioral Contracts bc-fix workflow · Scan <BASELINE_SCAN_ID>*
+*Generated by Nark nark-fix workflow · Scan <BASELINE_SCAN_ID>*
 ```
 
 **Rules:**
@@ -1120,7 +1188,7 @@ Build from the deduplicated `$SCANNER_ISSUES` list. If empty, use `'[]'`.
 
 ## MCP Tool Reference
 
-The following MCP tools are called on the `behavioral-contracts` server throughout this skill. All require the server to be registered and reachable. If unreachable, fallback to `--skip-upload` behavior (fixes still happen, no feedback is pushed).
+The following MCP tools are called on the `nark` server throughout this skill. All require the server to be registered and reachable. If unreachable, fallback to `--skip-upload` behavior (fixes still happen, no feedback is pushed).
 
 All MCP tools are called via `POST $BASE_URL/api/mcp` with JSON-RPC body:
 ```
@@ -1137,7 +1205,10 @@ All MCP tools are called via `POST $BASE_URL/api/mcp` with JSON-RPC body:
 | `get_resolution_history` | Phase 2.1.5 — per package | `packageName` |
 | `batch_review_violations` | Phase 2.5.4 — after triage | `violationIds[]`, `action` (TRUE_POSITIVE/FALSE_POSITIVE/FLAG), optional `subViolationIndex` (0-based, for per-postcondition labels) |
 | `add_violation_note` | Phase 2.5.4 — per FP | `violationId`, `note` (scanner shortcoming description) |
-| `resolve_violation` | Step 4.4 — per fixed violation | `violationId`, `resolutionDetail` |
+| `resolve_violation` | Step 4.4 — per fixed violation (fallback when no queueId) | `violationId`, `resolutionDetail` |
+| `queue_fix` | Phase 2.5.4 Pass A — after TP batch_review | `violationId`, `note` — returns `queueId` |
+| `mark_fixed` | Step 4.4 — per fixed violation when queueId available | `queueId`, `resolution`, `resolveViolation` (bool) — closes queue item; if resolveViolation: true also writes RESOLVE review |
+| `get_fix_queue` | (future / agent use) — retrieve pending queue items | none required — returns pending queue items for the repo |
 | `submit_fix_session` | Step 5.6 — aggregate session record | `repositoryId`, `scanBeforeId`, `scanAfterId`, `violationsFixed`, `fpCount`, `borderlineCount`, `packagesFixed`, `scannerIssues`, `branch`, `commitBefore`, `commitAfter` |
 
 ---
@@ -1183,19 +1254,18 @@ All MCP tools are called via `POST $BASE_URL/api/mcp` with JSON-RPC body:
 
 ## Reference
 
-- **bc-scan skill:** `~/.claude/skills/bc-scan/SKILL.md`
-- **MCP setup:** `claude mcp add --transport http behavioral-contracts <url> --header 'Authorization: Bearer <key>' --scope user`
-- **MCP tools list:** Call `mcp__behavioral-contracts__ping` to verify connectivity
+- **MCP setup:** `claude mcp add --transport http nark <url> --header 'Authorization: Bearer <key>' --scope user`
+- **MCP tools list:** Call `mcp__nark__ping` to verify connectivity
 
 ---
 
 ## Reusable Iteration Prompt
 
 ```
-I want to use /bc-fix to fix behavioral contract violations in this repo, one package at a time.
+I want to use /nark-fix to fix Nark profile violations in this repo, one package at a time.
 
 Please:
-1. Run /bc-fix to get a baseline scan (or /bc-fix --package <name> to target one package)
+1. Run /nark-fix to get a baseline scan (or /nark-fix --package <name> to target one package)
 2. Pick the package with the most violations (or I'll specify with --package <name>)
 3. For each violation, triage before fixing:
    - Read the flagged line ±15 lines of context
