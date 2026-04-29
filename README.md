@@ -28,8 +28,8 @@ git clone https://github.com/nark-sh/nark-fix ~/.claude/skills/nark-fix
 ## Prerequisites
 
 1. **A Nark account** — [app.nark.sh](https://app.nark.sh) (Solo plan or higher for API access)
-2. **MCP configured** — Follow the setup guide at [app.nark.sh/developer](https://app.nark.sh/developer)
-3. **The repository connected** — The GitHub repo you're scanning must be connected in your Nark dashboard
+2. **Authenticated** — Run `npx nark auth login` to authenticate your machine
+3. **MCP configured** — Follow the setup guide at [app.nark.sh/developer](https://app.nark.sh/developer)
 
 ## Usage
 
