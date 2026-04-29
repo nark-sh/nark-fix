@@ -78,63 +78,72 @@ Both will run start to finish without requiring any user input or restarts, even
 
 The goal of nark-fix is to reach **zero violations** so the PR gate passes. When a violation cannot be eliminated through code changes, there are two resolution mechanisms:
 
-1. **`.bc-suppressions.json`** — commit-tracked suppression by fingerprint. The correct tool for persistent FPs that the whole team should share. No source file changes needed.
+1. **`.narkrc.json`** — commit-tracked suppression by postconditionId (and optionally file glob). The correct tool for persistent FPs that the whole team should share. No source file changes needed.
 2. **Dashboard FALSE_POSITIVE label** — marks a violation as reviewed on the dashboard. Labels carry forward scan-to-scan via fingerprint matching.
 
-**Use `.bc-suppressions.json` first** — it's commit-tracked (visible in PR diffs), shared across all team members, and works with the cloud scanner and local CLI identically.
+**Use `.narkrc.json` first** — it's commit-tracked (visible in PR diffs), shared across all team members, and works with the local CLI.
 
-### `.bc-suppressions.json` format
+> **IMPORTANT — `.nark-suppressions.json` is NOT a suppression mechanism.**
+> That file is telemetry-only (enriches FP signal sent to nark.sh for corpus improvement). Writing entries to it does NOT suppress violations from scan output. The only config-based suppression the analyzer reads is `.narkrc.json`.
+
+> **IMPORTANT — `.narkrc.json` location.**
+> The analyzer sets `projectRoot = path.dirname(tsconfig)`. Place `.narkrc.json` in that directory (e.g. `apps/web/.narkrc.json` when `--tsconfig apps/web/tsconfig.json`), NOT at the git repo root.
+
+### `.narkrc.json` format
 
 ```json
 {
-  "version": "1.0",
-  "suppressions": [
+  "ignore": [
     {
-      "fingerprint": "51e2462ed848e6bad93773eccb456163",
-      "package": "react-hook-form",
-      "postconditionId": "missing-form-provider",
-      "filePath": "components/Input.tsx",
-      "lineNumber": 38,
-      "reason": "useFormContext() called unconditionally per Rules of Hooks. hookToForm prop defaults false; all usage is null-guarded via isFullyHooked check.",
-      "suppressedAt": "2026-04-02T00:00:00Z"
+      "package": "next",
+      "postconditionId": "redirect-inside-try-catch",
+      "reason": "Next.js redirect() throws NEXT_REDIRECT intentionally — caught by framework error boundary, not user try-catch. Wrapping would swallow the redirect."
+    },
+    {
+      "file": "src/generated/**",
+      "package": "prisma",
+      "postconditionId": "missing-error-handling",
+      "reason": "Generated code — do not modify."
     }
   ]
 }
 ```
 
-**Every suppression requires a `reason`** — this is the audit trail for code review.
+Fields per rule (all optional except `reason`):
+- `package` — package name to match (or `"*"` for any)
+- `postconditionId` — the rule ID to suppress (or `"*"` for any)
+- `file` — glob pattern relative to projectRoot (matches violation file path)
+- `reason` — **required**, min 10 chars — audit trail for code review
 
-### How to get fingerprints
-
-The fingerprint for each violation is returned in `list_errors_for_package` results as the `fingerprint` field. Read it directly from the MCP response — no CLI needed.
+At least one of `file`, `package`, or `postconditionId` must be specified.
 
 ### When to use suppression vs. code fix
 
 | Situation | Resolution |
 |-----------|-----------|
 | Error state is genuinely unhandled | Fix the code (add try-catch, expose `error`, add `onError`) |
-| Error is handled by graceful degradation the scanner can't detect | Fix the code if trivial (1–2 lines, e.g. add `error` to destructuring); else suppress |
-| Hook must be called unconditionally (Rules of Hooks), usage is null-guarded | Add to `.bc-suppressions.json` |
-| Architectural pattern is intentional (optional FormProvider, optional context) | Add to `.bc-suppressions.json` |
-| Violation is in generated/vendored code | Add to `.bc-suppressions.json` |
-| After a code fix the scanner still flags the same site due to a language constraint | Add to `.bc-suppressions.json` for the residual |
+| Error is handled by graceful degradation the scanner can't detect | Fix the code if trivial (1–2 lines); else suppress via `.narkrc.json` |
+| Hook must be called unconditionally (Rules of Hooks), usage is null-guarded | Add to `.narkrc.json` |
+| Architectural pattern is intentional (optional FormProvider, optional context) | Add to `.narkrc.json` |
+| Violation is in generated/vendored code | Add to `.narkrc.json` with `file` glob |
+| After a code fix the scanner still flags the same site due to a language constraint | Add to `.narkrc.json` for the residual |
+| Next.js redirect()/notFound() inside try-catch FP | Add to `.narkrc.json` — these are intentional control-flow throws |
 
 ### Suppression workflow in nark-fix
 
 In Phase 2.5, when a violation is labeled LIKELY FALSE POSITIVE and a code fix is not appropriate:
 
-1. Read the violation's `fingerprint` from `list_errors_for_package` response
-2. Read or create `.bc-suppressions.json` at repo root
-3. Add a suppression entry with the fingerprint, reason, and all metadata fields
-4. `git add .bc-suppressions.json` and include it in the batch commit
-5. After the commit, trigger a rescan — suppressed violations will not appear in the next scan results
-6. Also call `batch_review_violations` with `action: "FALSE_POSITIVE"` for the dashboard label (belt-and-suspenders)
-
-**Stale suppressions are cleaned automatically** after each scan — if the violation is fixed or the code moves, the suppression is removed from `.bc-suppressions.json` automatically. You never need to manually audit it.
+1. Determine `postconditionId` from the violation (the `contract_clause` field)
+2. Determine the correct `.narkrc.json` path: `path.dirname(<tsconfig path>)/.narkrc.json`
+3. Read or create `.narkrc.json` at that location
+4. Add an `ignore` entry with `package`, `postconditionId`, and a meaningful `reason`
+5. `git add <path>/.narkrc.json` and include it in the batch commit
+6. After the commit, trigger a rescan — suppressed violations will not appear in the next scan results
+7. Also call `batch_review_violations` with `action: "FALSE_POSITIVE"` for the dashboard label (belt-and-suspenders)
 
 ### Dashboard FALSE_POSITIVE label
 
-Use in addition to `.bc-suppressions.json` (belt-and-suspenders), OR alone when you can't commit (e.g. a temp workaround). Labels carry forward via fingerprint matching scan-to-scan, but are not visible in PR diffs. Prefer `.bc-suppressions.json` for the team-visible audit trail.
+Use in addition to `.narkrc.json` (belt-and-suspenders), OR alone when you can't commit (e.g. a temp workaround). Labels carry forward via fingerprint matching scan-to-scan, but are not visible in PR diffs. Prefer `.narkrc.json` for the team-visible audit trail.
 
 ---
 
@@ -186,11 +195,12 @@ If the file exists and `--fresh` flag was NOT passed:
 
 Check in order:
 1. `$NARK_API_KEY` environment variable
-2. `cat ~/.claude.json 2>/dev/null` → parse `projects.<cwd>.mcpServers["nark"].headers.Authorization` → strip `"Bearer "` prefix
-3. `cat ~/.claude.json 2>/dev/null` → parse top-level `mcpServers["nark"].headers.Authorization`
-4. `cat ~/.claude/claude_desktop_config.json 2>/dev/null` → same path
+2. `cat ~/.nark/credentials 2>/dev/null` → parse `.token` field (this is where `npx nark auth login` stores the key)
+3. `cat ~/.claude.json 2>/dev/null` → parse `projects.<cwd>.mcpServers["nark"].headers.Authorization` → strip `"Bearer "` prefix
+4. `cat ~/.claude.json 2>/dev/null` → parse top-level `mcpServers["nark"].headers.Authorization`
+5. `cat ~/.claude/claude_desktop_config.json 2>/dev/null` → same path
 
-If no key found and `--skip-upload` not set: tell the user "API key not found. Set NARK_API_KEY or configure MCP with: claude mcp add --transport http nark <url> --header 'Authorization: Bearer <key>' --scope user". Stop.
+If no key found and `--skip-upload` not set: tell the user "API key not found. Run `npx nark auth login` or set NARK_API_KEY". Stop.
 
 Store as `$API_KEY`.
 
@@ -823,11 +833,11 @@ Arguments: {
 
 Call individually (not batch) to provide rich per-violation detail. If the dashboard violation ID is not in `$VIOLATION_ID_MAP`, skip and log.
 
-**For violations that go to .bc-suppressions.json or are genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
+**For violations that go to .nark-suppressions.json or are genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
 ```
 Arguments: {
   queueId: <$QUEUE_ID_MAP[violationId]>,
-  resolution: "Cannot fix: <reason>. Added to .bc-suppressions.json ignore.",
+  resolution: "Cannot fix: <reason>. Added to .nark-suppressions.json ignore.",
   resolveViolation: false
 }
 ```
@@ -962,11 +972,11 @@ Arguments: {
 
 Call individually (not batch) to provide rich per-violation detail. If the dashboard violation ID is not in `$VIOLATION_ID_MAP`, skip and log.
 
-**For violations that go to .bc-suppressions.json or are genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
+**For violations that go to .nark-suppressions.json or are genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
 ```
 Arguments: {
   queueId: <$QUEUE_ID_MAP[violationId]>,
-  resolution: "Cannot fix: <reason>. Added to .bc-suppressions.json ignore.",
+  resolution: "Cannot fix: <reason>. Added to .nark-suppressions.json ignore.",
   resolveViolation: false
 }
 ```
