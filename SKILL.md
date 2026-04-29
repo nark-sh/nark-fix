@@ -5,7 +5,7 @@
 
 Agentic loop that scans a repo for Nark profile violations, triages false positives, pushes TP/FP/resolve feedback to the dashboard via MCP tools, applies DRY fixes package-by-package, and loops until the repo is clean. Each triage decision and fix is recorded in the dashboard for corpus/verify-cli improvement.
 
-**Goal: reach zero violations so the PR gate passes.** When a violation cannot be fixed through code (scanner limitation / Rules of Hooks / intentional design), use `.bc-scan` ignore entries as the resolution path — not leaving violations unaddressed.
+**Goal: reach zero violations so the PR gate passes.** When a violation cannot be fixed through code (scanner limitation / Rules of Hooks / intentional design), use `.nark/config.json` ignore entries as the resolution path — not leaving violations unaddressed.
 
 ---
 
@@ -198,7 +198,7 @@ Store as `$API_KEY`.
 
 Resolve in priority order:
 1. `--local` flag passed at invocation → use `http://localhost:3000`
-2. `.bc-scan` config file `baseUrl` field
+2. `.nark/config.json` file `baseUrl` field
 3. `$BC_BASE_URL` environment variable
 4. Default: `https://app.nark.sh`
 
