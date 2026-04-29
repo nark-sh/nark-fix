@@ -833,11 +833,11 @@ Arguments: {
 
 Call individually (not batch) to provide rich per-violation detail. If the dashboard violation ID is not in `$VIOLATION_ID_MAP`, skip and log.
 
-**For violations that go to .nark-suppressions.json or are genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
+**For violations added to .narkrc.json or genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
 ```
 Arguments: {
   queueId: <$QUEUE_ID_MAP[violationId]>,
-  resolution: "Cannot fix: <reason>. Added to .nark-suppressions.json ignore.",
+  resolution: "Cannot fix: <reason>. Added ignore rule to .narkrc.json.",
   resolveViolation: false
 }
 ```
@@ -972,11 +972,11 @@ Arguments: {
 
 Call individually (not batch) to provide rich per-violation detail. If the dashboard violation ID is not in `$VIOLATION_ID_MAP`, skip and log.
 
-**For violations that go to .nark-suppressions.json or are genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
+**For violations added to .narkrc.json or genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
 ```
 Arguments: {
   queueId: <$QUEUE_ID_MAP[violationId]>,
-  resolution: "Cannot fix: <reason>. Added to .nark-suppressions.json ignore.",
+  resolution: "Cannot fix: <reason>. Added ignore rule to .narkrc.json.",
   resolveViolation: false
 }
 ```
