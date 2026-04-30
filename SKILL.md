@@ -149,6 +149,25 @@ Use in addition to `.narkrc.json` (belt-and-suspenders), OR alone when you can't
 
 ## Phase 0 — Bootstrap
 
+### Step 0.0-pre — Check for skill updates
+
+Before anything else, check if the local nark-fix skill is behind the remote. This is a non-blocking check — if it fails (no network, no git), skip silently.
+
+```bash
+SKILL_DIR="$HOME/.claude/skills/nark-fix"
+if [ -d "$SKILL_DIR/.git" ]; then
+  LOCAL_SHA=$(git -C "$SKILL_DIR" rev-parse HEAD 2>/dev/null)
+  REMOTE_SHA=$(git -C "$SKILL_DIR" ls-remote origin HEAD 2>/dev/null | cut -f1)
+  if [ -n "$REMOTE_SHA" ] && [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+    echo "⚡ nark-fix skill update available. Run: cd ~/.claude/skills/nark-fix && git pull"
+  fi
+fi
+```
+
+If the local and remote SHAs differ, print the update notice and continue. Do NOT auto-pull — the user may be on a custom branch or have local modifications. Just inform them.
+
+If `ls-remote` takes more than 3 seconds (slow network), skip the check entirely — do not block the fix session.
+
 ### Step 0.0 — Check for existing run state
 
 Before anything else, check for `.nark/fix-state.json` in the current repo root:
