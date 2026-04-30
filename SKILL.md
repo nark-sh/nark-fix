@@ -1,7 +1,7 @@
 # nark-fix Skill
 
 **Trigger:** `/nark-fix`, "nark fix", "fix Nark profile violations", "resolve nark violations", "fix nark errors"
-**Version:** 2.1.0
+**Version:** 2.2.0
 
 Agentic loop that scans a repo for Nark profile violations, triages false positives, pushes TP/FP/resolve feedback to the dashboard via MCP tools, applies DRY fixes package-by-package, and loops until the repo is clean. Each triage decision and fix is recorded in the dashboard for corpus/verify-cli improvement.
 
@@ -189,7 +189,7 @@ If the file exists and `--fresh` flag was NOT passed:
 
 **`--fresh` flag:** If `--fresh` is passed, ignore any existing state file and run the full flow from scratch (overwriting the state file at Phase 1).
 
-**Note on gitignore:** When first writing `.nark/fix-state.json` (Step 1.2.5 below), check whether it is already in the target repo's `.gitignore`. If not, append both `.nark/fix-state.json` and `.nark/fix-continuation.md` to `.gitignore`.
+**Note on gitignore:** When first writing `.nark/fix-state.json` (Step 1.2.5 below), check whether it is already in the target repo's `.gitignore`. If not, append `.nark/fix-state.json`, `.nark/fix-continuation.md`, and `.nark/impact-report.md` to `.gitignore`.
 
 ### Step 0.1 — Resolve API key
 
@@ -393,6 +393,7 @@ Also check `.gitignore` — if `.nark/fix-state.json` is not listed, append:
 ```
 .nark/fix-state.json
 .nark/fix-continuation.md
+.nark/impact-report.md
 ```
 
 ### Step 1.3 — Check if already clean
@@ -1138,6 +1139,145 @@ Write a `.nark/triage-report.md` file to the repo root. This file is meant to be
 - For TP groups, include the hotspot file breakdown table
 - If `--dry-run` was used and no fixes were applied, note that in the summary
 - If `--skip-upload` was used, omit the "What Was Sent to the Dashboard" section
+
+### Step 5.5.5 — Impact Report
+
+After the triage report, generate an Impact Report that shows developers the real-world consequences of the violations that were fixed. This makes the value of nark-fix concrete and visceral.
+
+**When to generate:** Always, unless `--dry-run` was used and no fixes were applied.
+
+**Data sources:** Use the per-violation data already accumulated during the fix loop:
+- `packageName` — which package the call belongs to
+- `postconditionId` — what kind of error handling was missing
+- `filePath` and function context — what the code does
+- `severity` — ERROR or WARNING
+- `$TP_COUNT`, `$FP_COUNT` — session counters
+- `$RESOLVED_VIOLATIONS` — list of `{violationId, resolutionDetail}`
+
+#### Step 5.5.5a — Build scenario lines
+
+For each fixed TRUE POSITIVE violation, generate a 1-sentence "What Could Have Gone Wrong" scenario. Use the `postconditionId`, `packageName`, and the function/file context to make it specific and concrete.
+
+**Pattern:** `"Without this fix, <failure mode> on <package>.<function>() would <user-visible consequence>"`
+
+**Scenario generation rules:**
+- Reference the actual function name and package from the violation
+- Describe a realistic failure mode based on `postconditionId`:
+
+| postconditionId pattern | Failure mode to describe |
+|---|---|
+| `missing-try-catch` / `missing-error-handling` | Network timeout, DNS failure, connection refused, or API error would propagate as unhandled rejection |
+| `record-not-found` | A missing/deleted record would cause a null reference crash instead of a 404 |
+| `connection-error` | Database/service connection loss would crash the process instead of retrying or failing gracefully |
+| `rate-limit` / `api-error-rate-limit` | A 429 response would be treated as a generic error instead of backing off |
+| `permission-denied` / `authorization` | An auth failure would show a cryptic 500 instead of a clear 403 |
+| `validation-error` | Invalid input would crash the handler instead of returning a 400 with field errors |
+| `timeout` | A slow upstream would hang the request indefinitely instead of failing fast |
+| `disconnect` / `cleanup` | Resource leak — connection/handle not released on error path |
+
+- Keep it to ONE sentence, max ~120 chars
+- Be specific to the codebase — mention the file purpose if clear from the path (e.g., "payment handler", "user signup", "background sync job")
+
+**Examples:**
+```
+- stripe.charges.create() in src/payments/charge.ts — Without this fix, a network timeout would return a generic 500 to the user instead of showing "payment processing failed, please retry"
+- axios.get() in src/jobs/sync-inventory.ts — Without this fix, a DNS failure would crash the background job silently, leaving inventory stale for hours
+- prisma.user.findUnique() in src/api/users/[id].ts — Without this fix, a deleted user would crash with "Cannot read properties of null" instead of returning 404
+```
+
+#### Step 5.5.5b — Compute risk score
+
+```
+RISK_SCORE = (errors_fixed * 3) + (warnings_fixed * 1)
+```
+
+Where `errors_fixed` = count of fixed violations with severity ERROR, `warnings_fixed` = count with severity WARNING.
+
+Risk level label:
+- 0: "No risk reduced" (nothing was fixed)
+- 1–5: "Low risk eliminated"
+- 6–15: "Moderate risk eliminated"
+- 16–30: "High risk eliminated"
+- 31+: "Critical risk eliminated"
+
+#### Step 5.5.5c — Print to terminal
+
+After the triage report output, print:
+
+```
+Nark — Impact Report
+═══════════════════════════════════════════════════════════
+
+Violations fixed: <TP_COUNT>
+  Errors:   <errors_fixed>
+  Warnings: <warnings_fixed>
+
+Risk score: <RISK_SCORE> — <risk level label>
+
+What Could Have Gone Wrong
+───────────────────────────────────────────────────────────
+  1. <package>.<function>() in <short file path>
+     <scenario sentence>
+
+  2. <package>.<function>() in <short file path>
+     <scenario sentence>
+
+  ...
+═══════════════════════════════════════════════════════════
+Full report saved to .nark/impact-report.md
+```
+
+If more than 10 scenarios, show the first 10 in the terminal and note: "... and <N> more (see .nark/impact-report.md for full list)"
+
+#### Step 5.5.5d — Write .nark/impact-report.md
+
+Write the full impact report to `<repo root>/.nark/impact-report.md`. Ensure `.nark/impact-report.md` is in `.gitignore` (add if not present).
+
+**Content:**
+
+```markdown
+# Nark Impact Report
+**Repository:** <githubFullName or local path>
+**Branch:** <branch> @ <commitSha>
+**Date:** <today>
+
+---
+
+## Summary
+
+| Metric | Value |
+|--------|-------|
+| Violations fixed | <TP_COUNT> |
+| Errors fixed | <errors_fixed> |
+| Warnings fixed | <warnings_fixed> |
+| Risk score | <RISK_SCORE> — <risk level label> |
+
+---
+
+## What Could Have Gone Wrong
+
+Each fix below prevented a potential production incident. Without these fixes, unhandled error paths would have caused crashes, data loss, or degraded user experience.
+
+| # | Package | Function | File | Severity | What Could Have Gone Wrong |
+|---|---------|----------|------|----------|---------------------------|
+| 1 | <pkg> | <func>() | <file> | ERROR | <scenario> |
+| 2 | <pkg> | <func>() | <file> | WARNING | <scenario> |
+| ... | | | | | |
+
+---
+
+## Risk Breakdown by Package
+
+| Package | Errors Fixed | Warnings Fixed | Package Risk Score |
+|---------|-------------|---------------|-------------------|
+| <pkg> | <N> | <M> | <N*3 + M*1> |
+| ... | | | |
+| **Total** | **<E>** | **<W>** | **<RISK_SCORE>** |
+
+---
+
+*Generated by nark-fix · Scan <BASELINE_SCAN_ID> → <FINAL_SCAN_ID>*
+```
 
 ### Step 5.6 — Submit fix session to dashboard (unless --skip-upload or --dry-run)
 
