@@ -669,31 +669,35 @@ After Phase 2.5 triage is complete, write `.nark/audit-report.md` with the follo
 **Date:** <ISO date>
 **Nark Version:** <from scan output>
 **Git Commit:** <COMMIT_BEFORE>
+**tsconfig:** <tsconfig path used for the scan>
 **Total Violations:** <N> (<TP_COUNT> True Positives, <FP_COUNT> False Positives, <BORDERLINE_COUNT> Borderline)
 
 ---
 
 ## Summary
 
-| Category | Count | True Positive | False Positive | Borderline |
-|----------|-------|---------------|----------------|------------|
-| <package>:<postconditionId> | <N> | <tp> | <fp> | <bl> |
-| ... | ... | ... | ... | ... |
+| Package | PostconditionId | Count | True Positive | False Positive | Borderline |
+|---------|----------------|-------|---------------|----------------|------------|
+| <package> | <postconditionId> | <N> | <tp> | <fp> | <bl> |
+| ... | ... | ... | ... | ... | ... |
+| **TOTAL** | | **<N>** | **<TP>** | **<FP>** | **<BL>** |
 
 ---
 
-## FALSE POSITIVES (<FP_COUNT>)
+## Impact Summary
 
-### <N>. <package>:<postconditionId> — <count> FP
-
-- **<file>:<line>**: <explanation of why this is a false positive — what existing code already handles the concern>
-- **Scanner issue**: <what the scanner/corpus missed — e.g. "doesn't detect try-catch in parent scope", "confuses NextResponse.redirect() with redirect() from next/navigation">
-
-... (repeat for each FP group)
+| Risk Level | Description | Count |
+|-----------|-------------|-------|
+| **Critical** | <description> | <N> |
+| **High** | <description> | <N> |
+| **Medium** | <description> | <N> |
+| **Low** | <description> | <N> |
 
 ---
 
 ## TRUE POSITIVES (<TP_COUNT>)
+
+Order by severity: Critical first, then High, Medium, Low.
 
 ### <N>. <package>:<postconditionId> — <count> TP (<IMPACT LEVEL>)
 
@@ -703,7 +707,7 @@ After Phase 2.5 triage is complete, write `.nark/audit-report.md` with the follo
 - `<file>:<line>` — <brief description>
 - ...
 
-... (repeat for each TP group)
+... (repeat for each TP group, ordered by impact)
 
 ---
 
@@ -715,19 +719,9 @@ After Phase 2.5 triage is complete, write `.nark/audit-report.md` with the follo
 
 ---
 
-## Impact Summary
-
-| Risk Level | Description | Count |
-|-----------|-------------|-------|
-| High | <description> | <N> |
-| Medium | <description> | <N> |
-| Low | <description> | <N> |
-
----
-
 ## Recommendations
 
-<Prioritized list of recommended actions, grouped by effort/impact. Suggest systemic fixes (e.g. global error handlers) over per-violation fixes where applicable.>
+<Prioritized list of recommended actions, grouped by effort/impact. Suggest systemic fixes (e.g. global error handlers) over per-violation fixes where applicable. Number each priority.>
 
 ---
 
@@ -747,6 +741,31 @@ Ready-to-use ignore entries for confirmed false positives. Copy into your `.nark
   ]
 }
 \```
+
+Note: When FPs are mixed with TPs at the same postconditionId level, they cannot be blanket-suppressed. Those require per-file suppressions or scanner improvements.
+
+---
+
+## Appendix A: Scanner/Corpus Improvement Opportunities
+
+<Compact table summarizing scanner issues discovered during triage. Reference .nark/scanner-issues.md for full detail.>
+
+| Package | Issue |
+|---------|-------|
+| <pkg> | <brief description of what the scanner got wrong> |
+
+---
+
+## Appendix B: False Positive Detail (<FP_COUNT>)
+
+<Full detail on each FP group — moved to appendix so the reader hits actionable findings first.>
+
+### <N>. <package>:<postconditionId> — <count> FP
+
+- **<file>:<line>**: <explanation of why this is a false positive — what existing code already handles the concern>
+- **Scanner issue**: <what the scanner/corpus missed — e.g. "doesn't detect try-catch in parent scope", "confuses NextResponse.redirect() with redirect() from next/navigation">
+
+... (repeat for each FP group)
 ```
 
 ### Step 2.6.2 — Impact classification
