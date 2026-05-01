@@ -48,6 +48,7 @@ Or say: **"nark fix"**, **"fix Nark profile violations"**, **"fix nark errors"**
 | `/nark-fix` | Scan + fix all ERROR violations (approval required) |
 | `/nark-fix --warnings` | Also fix WARNING violations |
 | `/nark-fix --dry-run` | Scan + show plan, but make no changes |
+| `/nark-fix --audit` | Scan + triage, produce TP/FP report with impact analysis, no fixes |
 | `/nark-fix --package axios` | Fix only violations for one package |
 | `/nark-fix --skip-upload` | Run locally only, no dashboard upload |
 
@@ -60,6 +61,16 @@ If you're unsure what changes will be made, always run `--dry-run` first:
 ```
 
 This shows the full fix plan — which files will be touched, what pattern each fix follows, and how many violations each batch resolves — without writing a single line of code.
+
+### Audit mode
+
+To get a TP/FP analysis report without any fixes:
+
+```
+/nark-fix --audit
+```
+
+This scans, triages each violation as True Positive / False Positive / Borderline, and produces a structured report at `.nark/audit-report.md` with impact assessments and recommendations. No code changes, no commits, no dashboard uploads.
 
 ## How it finds your API key
 

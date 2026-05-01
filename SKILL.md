@@ -15,6 +15,7 @@ Agentic loop that scans a repo for Nark profile violations, triages false positi
 /nark-fix                    # Scan + analyze + fix all ERRORs
 /nark-fix --warnings         # Also fix WARNINGs (default: ERRORs only)
 /nark-fix --dry-run          # Scan + show plan, but make no changes
+/nark-fix --audit            # Scan + triage → produce TP/FP report with impact analysis, no fixes
 /nark-fix --package <name>   # Fix only violations for one package (e.g. axios)
 /nark-fix --skip-upload      # Run locally only, no dashboard upload or MCP feedback
 /nark-fix --local            # Point at http://localhost:3000 instead of production (for saas development)
@@ -413,6 +414,7 @@ Also check `.gitignore` — if `.nark/fix-state.json` is not listed, append:
 .nark/fix-state.json
 .nark/fix-continuation.md
 .nark/impact-report.md
+.nark/audit-report.md
 ```
 
 ### Step 1.3 — Check if already clean
@@ -646,6 +648,114 @@ Update `.nark/fix-state.json`: set `phase` to `"fix_loop"` and add triage result
 ```
 
 Read the existing file, merge in the new fields, and overwrite.
+
+---
+
+## Phase 2.6 — Audit Report (only when `--audit`)
+
+**If `--audit` was NOT passed, skip this section entirely and proceed to Phase 3.**
+
+When `--audit` is passed, the skill produces a structured TP/FP analysis report and stops — no fix planning, no code changes, no commits, no dashboard upload.
+
+### Step 2.6.1 — Generate audit report
+
+After Phase 2.5 triage is complete, write `.nark/audit-report.md` with the following structure:
+
+```markdown
+# Nark Audit Report
+
+**Project:** <repo name from git remote or directory name>
+**Date:** <ISO date>
+**Nark Version:** <from scan output>
+**Git Commit:** <COMMIT_BEFORE>
+**Total Violations:** <N> (<TP_COUNT> True Positives, <FP_COUNT> False Positives, <BORDERLINE_COUNT> Borderline)
+
+---
+
+## Summary
+
+| Category | Count | True Positive | False Positive | Borderline |
+|----------|-------|---------------|----------------|------------|
+| <package>:<postconditionId> | <N> | <tp> | <fp> | <bl> |
+| ... | ... | ... | ... | ... |
+
+---
+
+## FALSE POSITIVES (<FP_COUNT>)
+
+### <N>. <package>:<postconditionId> — <count> FP
+
+- **<file>:<line>**: <explanation of why this is a false positive — what existing code already handles the concern>
+- **Scanner issue**: <what the scanner/corpus missed — e.g. "doesn't detect try-catch in parent scope", "confuses NextResponse.redirect() with redirect() from next/navigation">
+
+... (repeat for each FP group)
+
+---
+
+## TRUE POSITIVES (<TP_COUNT>)
+
+### <N>. <package>:<postconditionId> — <count> TP (<IMPACT LEVEL>)
+
+**What happens if left unfixed:** <impact description — e.g. "Users see blank screens with no error feedback when API calls fail", "Component crashes on invalid external data">
+
+**Affected locations:**
+- `<file>:<line>` — <brief description>
+- ...
+
+... (repeat for each TP group)
+
+---
+
+## BORDERLINE (<BORDERLINE_COUNT>)
+
+### <N>. <package>:<postconditionId>
+
+- **<file>:<line>**: <why it's ambiguous>
+
+---
+
+## Impact Summary
+
+| Risk Level | Description | Count |
+|-----------|-------------|-------|
+| High | <description> | <N> |
+| Medium | <description> | <N> |
+| Low | <description> | <N> |
+
+---
+
+## Recommendations
+
+<Prioritized list of recommended actions, grouped by effort/impact. Suggest systemic fixes (e.g. global error handlers) over per-violation fixes where applicable.>
+```
+
+### Step 2.6.2 — Impact classification
+
+For each TRUE POSITIVE group, assign an impact level:
+
+| Impact Level | Criteria |
+|-------------|----------|
+| **High** | Unhandled error crashes the application/server, data loss, security issue |
+| **Medium** | Silent failure with degraded UX (blank screens, missing feedback, stale data) |
+| **Low** | Edge-case failure unlikely to occur in practice, cosmetic, or already partially mitigated |
+
+### Step 2.6.3 — Output and stop
+
+Print a summary to the user:
+
+```
+Nark Audit Report
+═══════════════════════════════════════════════════════════
+
+Violations analyzed:  <N>
+True Positives:       <TP_COUNT> (High: <H>, Medium: <M>, Low: <L>)
+False Positives:      <FP_COUNT>
+Borderline:           <BORDERLINE_COUNT>
+
+Report saved to: .nark/audit-report.md
+```
+
+**Stop here.** Do not proceed to Phase 3. No fixes, no commits, no dashboard upload.
 
 ---
 
