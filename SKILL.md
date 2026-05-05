@@ -5,7 +5,7 @@
 
 Agentic loop that scans a repo for Nark profile violations, triages false positives, pushes TP/FP/resolve feedback to the dashboard via MCP tools, applies DRY fixes package-by-package, and loops until the repo is clean. Each triage decision and fix is recorded in the dashboard for corpus/verify-cli improvement.
 
-**Goal: reach zero violations so the PR gate passes.** When a violation cannot be fixed through code (scanner limitation / Rules of Hooks / intentional design), use `.narkrc.json` ignore entries as the resolution path — not leaving violations unaddressed.
+**Goal: reach zero violations so the PR gate passes.** When a violation cannot be fixed through code (scanner limitation / Rules of Hooks / intentional design), use `.nark/suppressions.json` ignore entries as the resolution path — not leaving violations unaddressed.
 
 ---
 
@@ -55,7 +55,7 @@ Encoding mirrors Claude Code's project memory: prepend `-`, replace `/` with `-`
 | `$NARK_PROJECT_DIR/impact-report.md` | "What could have gone wrong" report |
 | `$NARK_PROJECT_DIR/scanner-issues.md` | Corpus/scanner improvement notes |
 
-**The ONLY file the skill ever writes inside the user's repo is `.narkrc.json`** at `path.dirname(<tsconfig>)`, when a suppression rule for a confirmed FP is added. That file is intentionally team-shared and `git add`'d into the PR.
+**The ONLY file the skill ever writes inside the user's repo is `.nark/suppressions.json`** at `path.dirname(<tsconfig>)/.nark/suppressions.json`, when a suppression rule for a confirmed FP is added. That file is intentionally team-shared and `git add`'d into the PR.
 
 ---
 
@@ -110,18 +110,15 @@ Both will run start to finish without requiring any user input or restarts, even
 
 The goal of nark-fix is to reach **zero violations** so the PR gate passes. When a violation cannot be eliminated through code changes, there are two resolution mechanisms:
 
-1. **`.narkrc.json`** — commit-tracked suppression by postconditionId (and optionally file glob). The correct tool for persistent FPs that the whole team should share. No source file changes needed.
+1. **`.nark/suppressions.json`** — commit-tracked suppression by postconditionId (and optionally file glob). The correct tool for persistent FPs that the whole team should share. No source file changes needed.
 2. **Dashboard FALSE_POSITIVE label** — marks a violation as reviewed on the dashboard. Labels carry forward scan-to-scan via fingerprint matching.
 
-**Use `.narkrc.json` first** — it's commit-tracked (visible in PR diffs), shared across all team members, and works with the local CLI.
+**Use `.nark/suppressions.json` first** — it's commit-tracked (visible in PR diffs), shared across all team members, and works with the local CLI.
 
-> **IMPORTANT — `.nark-suppressions.json` is NOT a suppression mechanism.**
-> That file is telemetry-only (enriches FP signal sent to nark.sh for corpus improvement). Writing entries to it does NOT suppress violations from scan output. The only config-based suppression the analyzer reads is `.narkrc.json`.
+> **IMPORTANT — `.nark/suppressions.json` location.**
+> The analyzer sets `projectRoot = path.dirname(tsconfig)`. Place the `.nark/` folder in that directory (e.g. `apps/web/.nark/suppressions.json` when `--tsconfig apps/web/tsconfig.json`), NOT at the git repo root.
 
-> **IMPORTANT — `.narkrc.json` location.**
-> The analyzer sets `projectRoot = path.dirname(tsconfig)`. Place `.narkrc.json` in that directory (e.g. `apps/web/.narkrc.json` when `--tsconfig apps/web/tsconfig.json`), NOT at the git repo root.
-
-### `.narkrc.json` format
+### `.nark/suppressions.json` format
 
 ```json
 {
@@ -154,28 +151,29 @@ At least one of `file`, `package`, or `postconditionId` must be specified.
 | Situation | Resolution |
 |-----------|-----------|
 | Error state is genuinely unhandled | Fix the code (add try-catch, expose `error`, add `onError`) |
-| Error is handled by graceful degradation the scanner can't detect | Fix the code if trivial (1–2 lines); else suppress via `.narkrc.json` |
-| Hook must be called unconditionally (Rules of Hooks), usage is null-guarded | Add to `.narkrc.json` |
-| Architectural pattern is intentional (optional FormProvider, optional context) | Add to `.narkrc.json` |
-| Violation is in generated/vendored code | Add to `.narkrc.json` with `file` glob |
-| After a code fix the scanner still flags the same site due to a language constraint | Add to `.narkrc.json` for the residual |
-| Next.js redirect()/notFound() inside try-catch FP | Add to `.narkrc.json` — these are intentional control-flow throws |
+| Error is handled by graceful degradation the scanner can't detect | Fix the code if trivial (1–2 lines); else suppress via `.nark/suppressions.json` |
+| Hook must be called unconditionally (Rules of Hooks), usage is null-guarded | Add to `.nark/suppressions.json` |
+| Architectural pattern is intentional (optional FormProvider, optional context) | Add to `.nark/suppressions.json` |
+| Violation is in generated/vendored code | Add to `.nark/suppressions.json` with `file` glob |
+| After a code fix the scanner still flags the same site due to a language constraint | Add to `.nark/suppressions.json` for the residual |
+| Next.js redirect()/notFound() inside try-catch FP | Add to `.nark/suppressions.json` — these are intentional control-flow throws |
 
 ### Suppression workflow in nark-fix
 
 In Phase 2.5, when a violation is labeled LIKELY FALSE POSITIVE and a code fix is not appropriate:
 
 1. Determine `postconditionId` from the violation (the `contract_clause` field)
-2. Determine the correct `.narkrc.json` path: `path.dirname(<tsconfig path>)/.narkrc.json`
-3. Read or create `.narkrc.json` at that location
-4. Add an `ignore` entry with `package`, `postconditionId`, and a meaningful `reason`
-5. `git add <path>/.narkrc.json` and include it in the batch commit
-6. After the commit, trigger a rescan — suppressed violations will not appear in the next scan results
-7. Also call `batch_review_violations` with `action: "FALSE_POSITIVE"` for the dashboard label (belt-and-suspenders)
+2. Determine the correct `.nark/suppressions.json` path: `path.dirname(<tsconfig path>)/.nark/suppressions.json`
+3. Ensure the `.nark/` folder exists: `mkdir -p path.dirname(<tsconfig path>)/.nark`
+4. Read or create `.nark/suppressions.json` at that location
+5. Add an `ignore` entry with `package`, `postconditionId`, and a meaningful `reason`
+6. `git add <path>/.nark/suppressions.json` and include it in the batch commit
+7. After the commit, trigger a rescan — suppressed violations will not appear in the next scan results
+8. Also call `batch_review_violations` with `action: "FALSE_POSITIVE"` for the dashboard label (belt-and-suspenders)
 
 ### Dashboard FALSE_POSITIVE label
 
-Use in addition to `.narkrc.json` (belt-and-suspenders), OR alone when you can't commit (e.g. a temp workaround). Labels carry forward via fingerprint matching scan-to-scan, but are not visible in PR diffs. Prefer `.narkrc.json` for the team-visible audit trail.
+Use in addition to `.nark/suppressions.json` (belt-and-suspenders), OR alone when you can't commit (e.g. a temp workaround). Labels carry forward via fingerprint matching scan-to-scan, but are not visible in PR diffs. Prefer `.nark/suppressions.json` for the team-visible audit trail.
 
 ---
 
@@ -788,9 +786,9 @@ Order by severity: Critical first, then High, Medium, Low.
 
 ---
 
-## Suggested Suppressions (.narkrc.json)
+## Suggested Suppressions (.nark/suppressions.json)
 
-Ready-to-use ignore entries for confirmed false positives. Copy into your `.narkrc.json`:
+Ready-to-use ignore entries for confirmed false positives. Copy into your `.nark/suppressions.json`:
 
 \```json
 {
@@ -841,18 +839,19 @@ For each TRUE POSITIVE group, assign an impact level:
 | **Medium** | Silent failure with degraded UX (blank screens, missing feedback, stale data) |
 | **Low** | Edge-case failure unlikely to occur in practice, cosmetic, or already partially mitigated |
 
-### Step 2.6.3 — Write .narkrc.json suppressions for confirmed FPs
+### Step 2.6.3 — Write .nark/suppressions.json suppressions for confirmed FPs
 
 After generating the report, also persist the FP findings as actionable suppressions:
 
-1. **Read or create `.narkrc.json`** at `path.dirname(<tsconfig path>)`
-2. For each LIKELY FALSE POSITIVE group, add an `ignore` entry with:
+1. **Ensure the `.nark/` folder exists** at `path.dirname(<tsconfig path>)/.nark/` — `mkdir -p` first
+2. **Read or create `.nark/suppressions.json`** at `path.dirname(<tsconfig path>)/.nark/suppressions.json`
+3. For each LIKELY FALSE POSITIVE group, add an `ignore` entry with:
    - `package` — the package name
    - `postconditionId` — the rule ID
    - `file` — glob pattern if the FP is file-specific (omit if package-wide)
    - `reason` — concise explanation (min 10 chars) from the triage analysis
-3. **Deduplicate** — don't add entries that already exist in `.narkrc.json`
-4. Write the updated file
+4. **Deduplicate** — don't add entries that already exist in `.nark/suppressions.json`
+5. Write the updated file
 
 This ensures the triage work is not wasted — future scans (and `--dry-run` / full fix runs) will not re-flag these confirmed FPs.
 
@@ -943,7 +942,7 @@ Borderline:           <BORDERLINE_COUNT>
 Outputs:
   Report (HTML):     $NARK_PROJECT_DIR/audit-report.html  ← opened in browser (Cmd+P to save as PDF)
   Report (Markdown): $NARK_PROJECT_DIR/audit-report.md
-  Suppressions:      .narkrc.json (<N> entries added)
+  Suppressions:      .nark/suppressions.json (<N> entries added)
   Scanner issues:    $NARK_PROJECT_DIR/scanner-issues.md
 ```
 
@@ -1155,11 +1154,11 @@ Arguments: {
 
 Call individually (not batch) to provide rich per-violation detail. If the dashboard violation ID is not in `$VIOLATION_ID_MAP`, skip and log.
 
-**For violations added to .narkrc.json or genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
+**For violations added to .nark/suppressions.json or genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
 ```
 Arguments: {
   queueId: <$QUEUE_ID_MAP[violationId]>,
-  resolution: "Cannot fix: <reason>. Added ignore rule to .narkrc.json.",
+  resolution: "Cannot fix: <reason>. Added ignore rule to .nark/suppressions.json.",
   resolveViolation: false
 }
 ```
@@ -1294,11 +1293,11 @@ Arguments: {
 
 Call individually (not batch) to provide rich per-violation detail. If the dashboard violation ID is not in `$VIOLATION_ID_MAP`, skip and log.
 
-**For violations added to .narkrc.json or genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
+**For violations added to .nark/suppressions.json or genuinely unfixable** — when queueId is available, call `mark_fixed` with `resolveViolation: false`:
 ```
 Arguments: {
   queueId: <$QUEUE_ID_MAP[violationId]>,
-  resolution: "Cannot fix: <reason>. Added ignore rule to .narkrc.json.",
+  resolution: "Cannot fix: <reason>. Added ignore rule to .nark/suppressions.json.",
   resolveViolation: false
 }
 ```

@@ -162,7 +162,7 @@ Or for a preview without changes:
 
 ## 4. Suppress false positives
 
-Sometimes Nark flags code that's intentionally written that way. Suppress those with `.narkrc.json`:
+Sometimes Nark flags code that's intentionally written that way. Suppress those with `.nark/suppressions.json`:
 
 ```json
 {
@@ -176,7 +176,7 @@ Sometimes Nark flags code that's intentionally written that way. Suppress those 
 }
 ```
 
-Place `.narkrc.json` next to your `tsconfig.json`. It's meant to be committed — your team sees exactly what's suppressed and why.
+Place `.nark/suppressions.json` next to your `tsconfig.json` (inside a `.nark/` folder). It's meant to be committed — your team sees exactly what's suppressed and why.
 
 ---
 

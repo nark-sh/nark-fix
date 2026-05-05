@@ -25,10 +25,10 @@ This file is for humans. It is not referenced by SKILL.md and is not loaded into
 The highest-value sections to extract (saves ~135 lines / ~3-4K tokens):
 
 - MCP Tool Reference table (~40 lines) — only needed when debugging MCP connectivity
-- `.narkrc.json` format and suppression docs (~50 lines) — only needed during FP suppression in Phase 2.5
+- `.nark/suppressions.json` format and suppression docs (~50 lines) — only needed during FP suppression in Phase 2.5
 - Reusable Iteration Prompt (~25 lines) — user-facing prompt template, not used by the agent
 - Edge Cases (~20 lines) — rarely triggered paths
 
-Each extracted file would need a one-line instruction in SKILL.md like: "Before starting Phase 2.5 suppression, read `docs/narkrc-format.md`."
+Each extracted file would need a one-line instruction in SKILL.md like: "Before starting Phase 2.5 suppression, read `docs/suppressions-format.md`."
 
 **Revisit if:** SKILL.md exceeds ~2,000 lines or ~80KB, or if agents consistently run out of context before completing Phase 4 fix loops.
