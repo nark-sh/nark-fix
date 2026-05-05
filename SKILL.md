@@ -5,7 +5,7 @@
 
 Agentic loop that scans a repo for Nark profile violations, triages false positives, pushes TP/FP/resolve feedback to the dashboard via MCP tools, applies DRY fixes package-by-package, and loops until the repo is clean. Each triage decision and fix is recorded in the dashboard for corpus/verify-cli improvement.
 
-**Goal: reach zero violations so the PR gate passes.** When a violation cannot be fixed through code (scanner limitation / Rules of Hooks / intentional design), use `.nark/config.json` ignore entries as the resolution path — not leaving violations unaddressed.
+**Goal: reach zero violations so the PR gate passes.** When a violation cannot be fixed through code (scanner limitation / Rules of Hooks / intentional design), use `.narkrc.json` ignore entries as the resolution path — not leaving violations unaddressed.
 
 ---
 
@@ -22,9 +22,40 @@ Agentic loop that scans a repo for Nark profile violations, triages false positi
 /nark-fix --auto             # Fully autonomous: skip all approval gates and prompts, run every package to completion, auto-compact between packages so it can run indefinitely without user intervention
 /nark-fix --batch            # Scan once → fix all → rescan once. No intermediate scans. For automated use.
 /nark-fix --batch --auto     # Fully autonomous batch mode (no approval gate + no intermediate scans + auto-compact)
-/nark-fix --resume            # Explicitly resume from .nark/fix-state.json (same as auto-detection)
+/nark-fix --resume            # Explicitly resume from $NARK_PROJECT_DIR/fix-state.json (same as auto-detection)
 /nark-fix --fresh             # Ignore any existing state file and start over
 ```
+
+---
+
+## Runtime Artifact Location
+
+All transient artifacts the skill creates — state file, continuation file, triage/audit/impact reports, generated HTML, scanner-issues notes — live in a per-project directory under your home folder, NOT inside the user's repo. The skill never modifies the user's `.gitignore`.
+
+**Resolve the project directory at the start of every run:**
+
+```bash
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+ENCODED_PATH="-$(echo "$REPO_ROOT" | sed 's|/|-|g' | sed 's|^-||')"
+NARK_PROJECT_DIR="$HOME/.nark/projects/$ENCODED_PATH"
+mkdir -p "$NARK_PROJECT_DIR"
+```
+
+Encoding mirrors Claude Code's project memory: prepend `-`, replace `/` with `-`. Example: `/Users/alice/work/app` becomes `~/.nark/projects/-Users-alice-work-app/`.
+
+**File paths used throughout this skill:**
+
+| Variable | Path |
+|----------|------|
+| `$NARK_PROJECT_DIR/fix-state.json` | Phase 0 resume state |
+| `$NARK_PROJECT_DIR/fix-continuation.md` | Manual-resume prompt |
+| `$NARK_PROJECT_DIR/triage-report.md` | Final + incremental triage report |
+| `$NARK_PROJECT_DIR/audit-report.md` | `--audit` markdown output |
+| `$NARK_PROJECT_DIR/audit-report.html` | `--audit` HTML output |
+| `$NARK_PROJECT_DIR/impact-report.md` | "What could have gone wrong" report |
+| `$NARK_PROJECT_DIR/scanner-issues.md` | Corpus/scanner improvement notes |
+
+**The ONLY file the skill ever writes inside the user's repo is `.narkrc.json`** at `path.dirname(<tsconfig>)`, when a suppression rule for a confirmed FP is added. That file is intentionally team-shared and `git add`'d into the PR.
 
 ---
 
@@ -34,11 +65,11 @@ Agentic loop that scans a repo for Nark profile violations, triages false positi
 
 ### How it works
 
-nark-fix already writes `.nark/fix-state.json` after every package batch commit. This file contains everything needed to resume: branch, baseline scan ID, per-package status (pending/complete), and the full violation ID map. Phase 0 reads it automatically on startup and jumps back into the fix loop for remaining packages.
+nark-fix already writes `$NARK_PROJECT_DIR/fix-state.json` after every package batch commit. This file contains everything needed to resume: branch, baseline scan ID, per-package status (pending/complete), and the full violation ID map. Phase 0 reads it automatically on startup and jumps back into the fix loop for remaining packages.
 
 Auto-compact uses this mechanism deliberately:
 
-1. After each package batch commit, state is written to `.nark/fix-state.json`
+1. After each package batch commit, state is written to `$NARK_PROJECT_DIR/fix-state.json`
 2. If the auto-compact trigger fires, the skill calls `/compact` to compress context
 3. On resume, Phase 0 detects the state file, skips Phase 1 (scan) and Phase 2/2.5 (triage), and goes directly to Phase 3 for remaining packages — all without user input
 
@@ -51,18 +82,18 @@ After each package batch commit, check both conditions:
 
 If either condition is true:
 
-1. Confirm `.nark/fix-state.json` is current (it should be — Step 4.2a writes it immediately after commit)
+1. Confirm `$NARK_PROJECT_DIR/fix-state.json` is current (it should be — Step 4.2a writes it immediately after commit)
 2. Print:
    ```
-   [AUTO-COMPACT] <N> packages complete — compacting context. State saved to .nark/fix-state.json.
+   [AUTO-COMPACT] <N> packages complete — compacting context. State saved to $NARK_PROJECT_DIR/fix-state.json.
    Resume will pick up at: <list of remaining pending packages>
    ```
 3. Issue `/compact`
-4. On resume: Phase 0 detects `.nark/fix-state.json`, prints the resume banner, loads state, and continues with remaining packages — no user action needed
+4. On resume: Phase 0 detects `$NARK_PROJECT_DIR/fix-state.json`, prints the resume banner, loads state, and continues with remaining packages — no user action needed
 
 ### Incremental triage report
 
-The final `.nark/triage-report.md` (Phase 5.5) is built incrementally: each package's section is appended to the file immediately after that package's batch commit. This means if a compact + resume happens mid-run, the report already has all completed packages and only needs the remaining packages appended at Phase 5.5. The report file is gitignored alongside `.nark/fix-state.json`.
+The final `$NARK_PROJECT_DIR/triage-report.md` (Phase 5.5) is built incrementally: each package's section is appended to the file immediately after that package's batch commit. This means if a compact + resume happens mid-run, the report already has all completed packages and only needs the remaining packages appended at Phase 5.5.
 
 ### Recommended invocation for hands-free runs
 
@@ -171,11 +202,15 @@ If `ls-remote` takes more than 3 seconds (slow network), skip the check entirely
 
 ### Step 0.0 — Check for existing run state
 
-Before anything else, check for `.nark/fix-state.json` in the current repo root:
+Before anything else, resolve `$NARK_PROJECT_DIR` and check for an existing state file:
 
 ```bash
-if [ -f ".nark/fix-state.json" ]; then
-  STATE=$(cat .nark/fix-state.json)
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+ENCODED_PATH="-$(echo "$REPO_ROOT" | sed 's|/|-|g' | sed 's|^-||')"
+NARK_PROJECT_DIR="$HOME/.nark/projects/$ENCODED_PATH"
+mkdir -p "$NARK_PROJECT_DIR"
+if [ -f "$NARK_PROJECT_DIR/fix-state.json" ]; then
+  STATE=$(cat "$NARK_PROJECT_DIR/fix-state.json")
 fi
 ```
 
@@ -209,8 +244,6 @@ If the file exists and `--fresh` flag was NOT passed:
 
 **`--fresh` flag:** If `--fresh` is passed, ignore any existing state file and run the full flow from scratch (overwriting the state file at Phase 1).
 
-**Note on gitignore:** When first writing `.nark/fix-state.json` (Step 1.2.5 below), check whether it is already in the target repo's `.gitignore`. If not, append `.nark/fix-state.json`, `.nark/fix-continuation.md`, and `.nark/impact-report.md` to `.gitignore`.
-
 ### Step 0.1 — Resolve API key
 
 Check in order:
@@ -228,7 +261,7 @@ Store as `$API_KEY`.
 
 Resolve in priority order:
 1. `--local` flag passed at invocation → use `http://localhost:3000`
-2. `.nark/config.json` file `baseUrl` field
+2. `$NARK_PROJECT_DIR/config.json` file `baseUrl` field (written by `nark init`)
 3. `$BC_BASE_URL` environment variable
 4. Default: `https://app.nark.sh`
 
@@ -421,7 +454,7 @@ If MCP tools are unavailable (server offline), log "Dashboard feedback will be s
 
 ### Step 1.2.5 — Write initial state file
 
-After building `$VIOLATION_ID_MAP`, write `.nark/fix-state.json` to the repo root:
+After building `$VIOLATION_ID_MAP`, write `$NARK_PROJECT_DIR/fix-state.json` to the repo root:
 
 ```json
 {
@@ -447,16 +480,6 @@ After building `$VIOLATION_ID_MAP`, write `.nark/fix-state.json` to the repo roo
 ```
 
 // `queueIdMap` is populated during Phase 2.5.4 — maps dashboardViolationId → queueId
-
-Also check `.gitignore` — if `.nark/fix-state.json` is not listed, append:
-```
-.nark/fix-state.json
-.nark/fix-continuation.md
-.nark/impact-report.md
-.nark/audit-report.md
-.nark/audit-report.html
-.nark/scanner-issues.md
-```
 
 ### Step 1.3 — Check if already clean
 
@@ -673,7 +696,7 @@ This produces a MIXED badge on the dashboard instead of collapsing everything to
 
 ### Step 2.5.5 — Update state file with triage results
 
-Update `.nark/fix-state.json`: set `phase` to `"fix_loop"` and add triage results:
+Update `$NARK_PROJECT_DIR/fix-state.json`: set `phase` to `"fix_loop"` and add triage results:
 
 ```json
 {
@@ -700,7 +723,7 @@ When `--audit` is passed, the skill produces a structured TP/FP analysis report 
 
 ### Step 2.6.1 — Generate audit report
 
-After Phase 2.5 triage is complete, write `.nark/audit-report.md` with the following structure:
+After Phase 2.5 triage is complete, write `$NARK_PROJECT_DIR/audit-report.md` with the following structure:
 
 ```markdown
 # Nark Audit Report
@@ -788,7 +811,7 @@ Note: When FPs are mixed with TPs at the same postconditionId level, they cannot
 
 ## Appendix A: Scanner/Corpus Improvement Opportunities
 
-<Compact table summarizing scanner issues discovered during triage. Reference .nark/scanner-issues.md for full detail.>
+<Compact table summarizing scanner issues discovered during triage. Reference $NARK_PROJECT_DIR/scanner-issues.md for full detail.>
 
 | Package | Issue |
 |---------|-------|
@@ -835,7 +858,7 @@ This ensures the triage work is not wasted — future scans (and `--dry-run` / f
 
 ### Step 2.6.4 — Write scanner improvement notes
 
-Write `.nark/scanner-issues.md` with deduplicated scanner/corpus improvement opportunities discovered during triage:
+Write `$NARK_PROJECT_DIR/scanner-issues.md` with deduplicated scanner/corpus improvement opportunities discovered during triage:
 
 ```markdown
 # Scanner Improvement Notes
@@ -847,21 +870,21 @@ Generated by `nark-fix --audit` on <date>
 | <pkg> | <rule> | <what the scanner got wrong> | <how to fix in verify-cli or corpus> |
 ```
 
-This file helps the nark team improve the corpus. It is gitignored.
+This file helps the Nark team improve the corpus. It lives in `~/.nark/projects/<encoded>/` so it never clutters the user's repo.
 
 ### Step 2.6.5 — Generate HTML report and open in browser
 
 Convert the markdown audit report to a styled HTML file so it can be opened in a browser and easily printed to PDF.
 
 ```bash
-npx marked -i .nark/audit-report.md -o .nark/audit-report.html 2>/dev/null
+npx marked -i "$NARK_PROJECT_DIR/audit-report.md" -o "$NARK_PROJECT_DIR/audit-report.html" 2>/dev/null
 ```
 
 If `marked` is not available or fails, fall back to a raw approach:
 
 ```bash
 # Wrap markdown in minimal HTML with GitHub-flavored styling
-cat > .nark/audit-report.html << 'HTMLEOF'
+cat > "$NARK_PROJECT_DIR/audit-report.html" << 'HTMLEOF'
 <!DOCTYPE html>
 <html>
 <head>
@@ -887,19 +910,19 @@ HTMLEOF
 
 # Append converted markdown (use marked if available, otherwise include raw markdown in <pre>)
 if command -v npx &>/dev/null && npx marked --version &>/dev/null 2>&1; then
-  npx marked -i .nark/audit-report.md >> .nark/audit-report.html
+  npx marked -i "$NARK_PROJECT_DIR/audit-report.md" >> "$NARK_PROJECT_DIR/audit-report.html"
 else
-  echo "<pre>" >> .nark/audit-report.html
-  cat .nark/audit-report.md >> .nark/audit-report.html
-  echo "</pre>" >> .nark/audit-report.html
+  echo "<pre>" >> "$NARK_PROJECT_DIR/audit-report.html"
+  cat "$NARK_PROJECT_DIR/audit-report.md" >> "$NARK_PROJECT_DIR/audit-report.html"
+  echo "</pre>" >> "$NARK_PROJECT_DIR/audit-report.html"
 fi
 
-echo "</body></html>" >> .nark/audit-report.html
+echo "</body></html>" >> "$NARK_PROJECT_DIR/audit-report.html"
 ```
 
 Then open it:
 ```bash
-open .nark/audit-report.html 2>/dev/null || xdg-open .nark/audit-report.html 2>/dev/null || echo "Open .nark/audit-report.html in your browser"
+open "$NARK_PROJECT_DIR/audit-report.html" 2>/dev/null || xdg-open "$NARK_PROJECT_DIR/audit-report.html" 2>/dev/null || echo "Open $NARK_PROJECT_DIR/audit-report.html in your browser"
 ```
 
 The user can then `Cmd+P` → "Save as PDF" to share it.
@@ -918,10 +941,10 @@ False Positives:      <FP_COUNT>
 Borderline:           <BORDERLINE_COUNT>
 
 Outputs:
-  Report (HTML):     .nark/audit-report.html  ← opened in browser (Cmd+P to save as PDF)
-  Report (Markdown): .nark/audit-report.md
+  Report (HTML):     $NARK_PROJECT_DIR/audit-report.html  ← opened in browser (Cmd+P to save as PDF)
+  Report (Markdown): $NARK_PROJECT_DIR/audit-report.md
   Suppressions:      .narkrc.json (<N> entries added)
-  Scanner issues:    .nark/scanner-issues.md
+  Scanner issues:    $NARK_PROJECT_DIR/scanner-issues.md
 ```
 
 **Stop here.** Do not proceed to Phase 3. No fixes, no commits, no dashboard upload.
@@ -1037,9 +1060,9 @@ If pre-commit hook fails: fix the hook error, re-stage, create a NEW commit (nev
 
 After committing, perform two housekeeping writes:
 
-**4.2a — Update state file:** Read `.nark/fix-state.json`, set `packages["<this package>"].status = "complete"` and `packages["<this package>"].commit = "<git rev-parse --short HEAD>"`, then overwrite the file.
+**4.2a — Update state file:** Read `$NARK_PROJECT_DIR/fix-state.json`, set `packages["<this package>"].status = "complete"` and `packages["<this package>"].commit = "<git rev-parse --short HEAD>"`, then overwrite the file.
 
-**4.2b — Write continuation file:** Overwrite `.nark/fix-continuation.md` with:
+**4.2b — Write continuation file:** Overwrite `$NARK_PROJECT_DIR/fix-continuation.md` with:
 
 ```markdown
 # nark-fix continuation
@@ -1048,7 +1071,7 @@ If this session ran out of context, simply re-run:
 
     /nark-fix --auto --local --warnings
 
-nark-fix will auto-detect `.nark/fix-state.json` and resume from where it stopped.
+nark-fix will auto-detect `$NARK_PROJECT_DIR/fix-state.json` and resume from where it stopped.
 
 ---
 
@@ -1069,7 +1092,7 @@ Please continue the fix loop for remaining packages, skipping completed ones.
 
 Update this file after every batch commit so it always reflects current progress.
 
-**4.2c — Append to incremental triage report:** After each package batch commit, append that package's section to `.nark/triage-report.md` (create if it doesn't exist). Use the same format as Phase 5.5 but for this package only. This ensures partial results survive a compact + resume cycle. Mark the file as gitignored alongside `.nark/fix-state.json` if not already.
+**4.2c — Append to incremental triage report:** After each package batch commit, append that package's section to `$NARK_PROJECT_DIR/triage-report.md` (create if it doesn't exist). Use the same format as Phase 5.5 but for this package only. This ensures partial results survive a compact + resume cycle.
 
 **4.2d — Auto-compact (--auto mode only):** After the state file, continuation file, and triage report are current, check auto-compact trigger:
 
@@ -1079,11 +1102,11 @@ Update this file after every batch commit so it always reflects current progress
 If either condition is true:
 1. Print:
    ```
-   [AUTO-COMPACT] <N> packages complete — compacting context. State saved to .nark/fix-state.json.
+   [AUTO-COMPACT] <N> packages complete — compacting context. State saved to $NARK_PROJECT_DIR/fix-state.json.
    Remaining: <list of pending package names>
    ```
 2. Issue `/compact` to compress context
-3. On resume: Phase 0 detects `.nark/fix-state.json`, prints the resume banner, and continues with remaining pending packages — no user action needed
+3. On resume: Phase 0 detects `$NARK_PROJECT_DIR/fix-state.json`, prints the resume banner, and continues with remaining pending packages — no user action needed
 
 ### Step 4.3 — Rescan and upload
 
@@ -1191,9 +1214,9 @@ For each package batch in the approved plan:
 - Do NOT push resolve feedback yet (no new scan ID)
 - After each commit, perform these housekeeping writes (batch mode variants):
 
-  **4.2a — Update state file:** Read `.nark/fix-state.json`, set `packages["<this package>"].status = "complete"` and `packages["<this package>"].commit = "<git rev-parse --short HEAD>"`, then overwrite the file.
+  **4.2a — Update state file:** Read `$NARK_PROJECT_DIR/fix-state.json`, set `packages["<this package>"].status = "complete"` and `packages["<this package>"].commit = "<git rev-parse --short HEAD>"`, then overwrite the file.
 
-  **4.2b — Write continuation file:** Overwrite `.nark/fix-continuation.md` with:
+  **4.2b — Write continuation file:** Overwrite `$NARK_PROJECT_DIR/fix-continuation.md` with:
 
   ```markdown
   # nark-fix continuation
@@ -1202,7 +1225,7 @@ For each package batch in the approved plan:
 
       /nark-fix --auto --local --warnings --batch
 
-  nark-fix will auto-detect `.nark/fix-state.json` and resume from where it stopped.
+  nark-fix will auto-detect `$NARK_PROJECT_DIR/fix-state.json` and resume from where it stopped.
   Note: batch mode is active — rescans are deferred to the final verify step.
 
   ---
@@ -1223,11 +1246,11 @@ For each package batch in the approved plan:
   When all packages are fixed, run the final batch scan (Step 4.3).
   ```
 
-  **4.2c — Append to incremental triage report:** Append this package's section to `.nark/triage-report.md` (create if it doesn't exist, gitignore alongside `.nark/fix-state.json`). Same format as Phase 5.5 but for this package only.
+  **4.2c — Append to incremental triage report:** Append this package's section to `$NARK_PROJECT_DIR/triage-report.md` (create if it doesn't exist). Same format as Phase 5.5 but for this package only.
 
   **4.2d — Auto-compact (--auto mode only):** After state file, continuation file, and triage report are current:
   - Trigger if: `packages_completed_this_session % 3 === 0` OR `total_violations_fixed_this_session > 20`
-  - Print: `[AUTO-COMPACT] <N> packages complete — compacting. State saved to .nark/fix-state.json. Remaining: <list>`
+  - Print: `[AUTO-COMPACT] <N> packages complete — compacting. State saved to $NARK_PROJECT_DIR/fix-state.json. Remaining: <list>`
   - Issue `/compact`. On resume, Phase 0 reads state and continues from next pending package automatically.
 
 - Continue to next package batch
@@ -1363,9 +1386,9 @@ If zero issues: "No scanner false positives detected — corpus coverage looks g
 
 ### Step 5.5 — Triage Report
 
-Write a `.nark/triage-report.md` file to the repo root. This file is meant to be shared with other developers and the corpus team. It should be comprehensive and standalone.
+Write a `$NARK_PROJECT_DIR/triage-report.md` file to the repo root. This file is meant to be shared with other developers and the corpus team. It should be comprehensive and standalone.
 
-**File path:** `<repo root>/.nark/triage-report.md`
+**File path:** `$NARK_PROJECT_DIR/triage-report.md`
 
 **Content structure:**
 
@@ -1522,14 +1545,14 @@ What Could Have Gone Wrong
 
   ...
 ═══════════════════════════════════════════════════════════
-Full report saved to .nark/impact-report.md
+Full report saved to $NARK_PROJECT_DIR/impact-report.md
 ```
 
-If more than 10 scenarios, show the first 10 in the terminal and note: "... and <N> more (see .nark/impact-report.md for full list)"
+If more than 10 scenarios, show the first 10 in the terminal and note: "... and <N> more (see $NARK_PROJECT_DIR/impact-report.md for full list)"
 
-#### Step 5.5.5d — Write .nark/impact-report.md
+#### Step 5.5.5d — Write impact-report.md
 
-Write the full impact report to `<repo root>/.nark/impact-report.md`. Ensure `.nark/impact-report.md` is in `.gitignore` (add if not present).
+Write the full impact report to `$NARK_PROJECT_DIR/impact-report.md`.
 
 **Content:**
 
