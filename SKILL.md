@@ -1,7 +1,7 @@
 # nark-fix Skill
 
 **Trigger:** `/nark-fix`, "nark fix", "fix Nark profile violations", "resolve nark violations", "fix nark errors"
-**Version:** 2.2.0
+**Version:** 2.3.0
 
 Agentic loop that scans a repo for Nark profile violations, triages false positives, pushes TP/FP/resolve feedback to the dashboard via MCP tools, applies DRY fixes package-by-package, and loops until the repo is clean. Each triage decision and fix is recorded in the dashboard for corpus/verify-cli improvement.
 
@@ -24,6 +24,7 @@ Agentic loop that scans a repo for Nark profile violations, triages false positi
 /nark-fix --batch --auto     # Fully autonomous batch mode (no approval gate + no intermediate scans + auto-compact)
 /nark-fix --resume            # Explicitly resume from $NARK_PROJECT_DIR/fix-state.json (same as auto-detection)
 /nark-fix --fresh             # Ignore any existing state file and start over
+/nark-fix --no-suppressions  # Triage FPs as usual but DO NOT write .nark/suppressions.json. Persist FP findings only via dashboard FALSE_POSITIVE labels (or scanner-issues.md). Use when running against a tree where suppressions must not appear in the diff (e.g. an OSS fork being prepared for an upstream PR).
 ```
 
 ---
@@ -160,16 +161,18 @@ At least one of `file`, `package`, or `postconditionId` must be specified.
 
 ### Suppression workflow in nark-fix
 
+> **`--no-suppressions` flag (v2.3.0+):** When this flag is passed, the skill MUST skip every step in this workflow that touches the user repo (steps 2–6 below). FP findings are still recorded via the dashboard FALSE_POSITIVE label (step 8) and via `scanner-issues.md`. Used by automation that prepares OSS forks for upstream PRs, where any `.nark/suppressions.json` write would leak into the diff.
+
 In Phase 2.5, when a violation is labeled LIKELY FALSE POSITIVE and a code fix is not appropriate:
 
 1. Determine `postconditionId` from the violation (the `contract_clause` field)
-2. Determine the correct `.nark/suppressions.json` path: `path.dirname(<tsconfig path>)/.nark/suppressions.json`
-3. Ensure the `.nark/` folder exists: `mkdir -p path.dirname(<tsconfig path>)/.nark`
-4. Read or create `.nark/suppressions.json` at that location
-5. Add an `ignore` entry with `package`, `postconditionId`, and a meaningful `reason`
-6. `git add <path>/.nark/suppressions.json` and include it in the batch commit
-7. After the commit, trigger a rescan — suppressed violations will not appear in the next scan results
-8. Also call `batch_review_violations` with `action: "FALSE_POSITIVE"` for the dashboard label (belt-and-suspenders)
+2. Determine the correct `.nark/suppressions.json` path: `path.dirname(<tsconfig path>)/.nark/suppressions.json` *(skip if `--no-suppressions`)*
+3. Ensure the `.nark/` folder exists: `mkdir -p path.dirname(<tsconfig path>)/.nark` *(skip if `--no-suppressions`)*
+4. Read or create `.nark/suppressions.json` at that location *(skip if `--no-suppressions`)*
+5. Add an `ignore` entry with `package`, `postconditionId`, and a meaningful `reason` *(skip if `--no-suppressions`)*
+6. `git add <path>/.nark/suppressions.json` and include it in the batch commit *(skip if `--no-suppressions`)*
+7. After the commit, trigger a rescan — suppressed violations will not appear in the next scan results *(skip if `--no-suppressions` — without a suppressions file the FPs will re-surface; the skill should mark them as FALSE_POSITIVE on the dashboard so fingerprint-matched scans suppress them at upload time)*
+8. Also call `batch_review_violations` with `action: "FALSE_POSITIVE"` for the dashboard label (belt-and-suspenders) — **always run this step regardless of `--no-suppressions`**
 
 ### Dashboard FALSE_POSITIVE label
 
@@ -466,7 +469,8 @@ After building `$VIOLATION_ID_MAP`, write `$NARK_PROJECT_DIR/fix-state.json` to 
     "auto": "<bool — was --auto passed>",
     "local": "<bool — was --local passed>",
     "batch": "<bool — was --batch passed>",
-    "skipUpload": "<bool — was --skip-upload passed>"
+    "skipUpload": "<bool — was --skip-upload passed>",
+    "noSuppressions": "<bool — was --no-suppressions passed>"
   },
   "phase": "triage",
   "packages": {
@@ -550,18 +554,83 @@ Read each unique file that contains violations. Understand:
 
 **Triage every violation before writing the fix plan.** Do not count a violation as "needs fixing" until you've read the code at the flagged location.
 
-### Step 2.5.1 — Read flagged context
+### Step 2.5.1 — Read flagged context (same-function)
 
 For each violation in the scan output:
 1. Read the flagged line ±15 lines of surrounding context
-2. Check whether the concern is ALREADY satisfied:
+2. Check whether the concern is ALREADY satisfied within the SAME function:
 
-| Postcondition | Signs of a false positive |
+| Postcondition | Same-function signs of a false positive |
 |---|---|
 | `record-not-found` | `if (!result)` / null check within ~10 lines after the call |
-| `missing-try-catch` | call is inside an outer `try { }` block or `.catch()` chain |
+| `missing-try-catch` | call is inside an outer `try { }` block or `.catch()` chain in the same function body |
 | `connection-error` | caller already catches connection error type |
 | `$disconnect` | call is inside `.finally()` or a shutdown/cleanup handler |
+
+If the violation is satisfied within the same function, label LIKELY FALSE POSITIVE at 2.5.2 and skip 2.5.1.5. If NOT satisfied within the same function, proceed to 2.5.1.5 — most real-world FPs in modern TypeScript codebases live one frame up, not in the same function.
+
+### Step 2.5.1.5 — Caller-context check (cross-function, MANDATORY for `missing-try-catch`)
+
+**Rationale:** Many backend codebases (NestJS, Express, Fastify, asyncHandler wrappers, tRPC) own the catch frame at the caller. The function nark flagged is intentionally unwrapped because its only caller already wraps it. Skipping this check is the dominant cause of false-true-positive PRs — see `work-packages/25-pr-initiative/prs/26-pr-calcom.md` for the case study (calcom/cal.diy PR #29247 — closed by maintainer; the controller had wrapped the call in try/catch since 2025-04-17, a year before the PR was opened).
+
+**Run this step for every `missing-try-catch` violation that survived 2.5.1.** Skip for non-`missing-try-catch` postconditions (the rule is specifically about who owns the catch frame).
+
+#### Procedure
+
+1. **Identify the flagged method.** From the violation, extract the enclosing class + method name (or top-level function name if not in a class). Example: `StripeService.saveStripeAccount`.
+
+2. **Find every importer of the flagged file.**
+   ```bash
+   # Take the flagged file's basename (no extension)
+   BASENAME=$(basename "<flagged-file>" .ts)
+
+   # Search the project for files that import it.
+   grep -rln "from .*${BASENAME}['\"]\|from .*${BASENAME}\$" \
+     <project-src-roots> --include="*.ts" --include="*.tsx" \
+     | grep -v ".spec." | grep -v ".test." | grep -v "/dist/" | grep -v "/node_modules/"
+   ```
+   For class-based services, also grep for the class name being injected: `<ClassName>` appearing as a constructor parameter type.
+
+3. **For each importer, locate the call site to the flagged method.**
+   ```bash
+   grep -n "\.<methodName>(" <importer-file>
+   ```
+
+4. **Read 20 lines of context BEFORE each call site.** Look for:
+   - **Outer `try { ... }` block** enclosing the call, with a `catch` that either returns a graceful response, calls `next(err)`, or swallows-and-logs.
+   - **NestJS controller markers:** the enclosing class has `@Controller(...)`; the enclosing method has `@Get(...)`/`@Post(...)`/`@Put(...)`/`@Delete(...)` and optionally `@Redirect(...)`/`@HttpCode(...)`. If the controller method body is wrapped in try/catch returning a value, the route decorator converts that value to an HTTP response — the user never sees a 5xx for thrown errors.
+   - **Express handler patterns:** the call is inside a function whose signature is `(req, res, next)` or wrapped in `asyncHandler(async (req, res) => ...)` / `tryCatchAsync(async ...)` / `safeHandler(...)`. Verify the project has an error middleware registered (`grep -rn "app\.use((err"` or `setErrorHandler(`).
+   - **Fastify handler patterns:** call is inside `fastify.<verb>('/path', async (req, reply) => ...)`. Verify `setErrorHandler` exists somewhere in the project (`grep -rn "setErrorHandler(" <project-src>`).
+   - **tRPC procedure resolve body:** call is inside `.query(async ({ input }) => ...)` or `.mutation(async ({ input }) => ...)`. tRPC owns the catch via `errorFormatter`.
+
+5. **Classify each caller** as one of:
+   - `unwrapped` — no outer try/catch, no framework callback ownership.
+   - `wrapped-by-app-code` — outer try/catch in the caller's lexical body. Record file:line of the `catch` block.
+   - `wrapped-by-framework-callback` — caller is a framework callback (NestJS/Express/Fastify/tRPC) with confirmed framework-level catch ownership. Record the framework + the confirming grep (e.g., `setErrorHandler defined at <file>:<line>`).
+
+6. **Decide the label:**
+
+| Caller distribution | Label | Rationale |
+|---|---|---|
+| **All** callers `wrapped-by-app-code` or `wrapped-by-framework-callback` | LIKELY FALSE POSITIVE | §15 caller-aware FP. The framework or app already owns the catch frame. Wrapping at the flagged site is redundant — user-visible behaviour does not change. |
+| At least one `unwrapped` caller | TRUE POSITIVE | The unwrapped caller path leaks. Fix is needed at the flagged site OR at the unwrapped caller (judgment call at fix-plan time). |
+| Mixed `unwrapped` + `wrapped-by-*` | BORDERLINE | The flagged method has both safe and unsafe callers. Fix the flagged site (wraps every caller), or document an exception. |
+| **Zero callers found** (dead code, or grep missed something) | BORDERLINE | Do not silently label FP on a grep miss. Note the zero-caller finding so the user sees it. |
+
+7. **Capture the evidence for 2.5.4's note payload:**
+   - For each LIKELY FALSE POSITIVE produced by this rule, record:
+     - `callerCount` — how many callers were enumerated
+     - `wrappedByAppCode` — list of `<file>:<line>` for outer try/catch wraps
+     - `wrappedByFrameworkCallback` — list of `<framework> + <confirming-grep>` entries
+     - `quotedCatchBody` — at least one outer catch body **quoted verbatim** (file:line:span + literal text). The dashboard note must include this quote, not just a pointer.
+
+#### Sanity check (avoid over-aggressive FP labeling)
+
+Three guardrails:
+
+- **Quoted catch must do something graceful.** If the caller's `catch` block is `catch (e) { throw e; }` (re-throw) or `catch (e) { /* TODO */ }` (empty), the caller is **not** owning the error — it's passing it through. Treat as `unwrapped` regardless of the lexical wrap. Real ownership = log + return graceful value, OR `next(err)` to middleware, OR translate to a framework HTTPException.
+- **Framework presence must be verified, not inferred from imports.** Importing `@nestjs/common` does not prove a `setErrorHandler` exists. Always grep for the actual handler registration before classifying as `wrapped-by-framework-callback`.
+- **If grep returns 0 importers, do NOT label FP.** A zero-importer result means either (a) dead code or (b) grep didn't catch the import pattern. Both warrant BORDERLINE, not FP.
 
 ### Step 2.5.2 — Label each violation and its sub-violations
 
@@ -580,7 +649,7 @@ For each LIKELY FALSE POSITIVE (primary or sub), capture:
 - The exact line(s) that already satisfy the concern
 - **Why the scanner got it wrong** — what pattern did verify-cli fail to detect? What does the corpus contract not cover?
 
-### Step 2.5.2.5 — Update session counters
+### Step 2.5.2.5 — Update session counters and caller-context pause check
 
 After labeling all violations (primary + sub), update the session-level counters:
 
@@ -592,6 +661,56 @@ After labeling all violations (primary + sub), update the session-level counters
   { packageName: "<pkg>", fixed: <TP count for this pkg>, fp: <FP count for this pkg> }
   ```
   (borderline violations count toward `fixed` since they will be fixed)
+
+#### Caller-context pause check (hands-free safety)
+
+After per-package counters are updated, compute the **caller-context FP ratio** for each package: the fraction of `missing-try-catch` violations that were downgraded to LIKELY FALSE POSITIVE specifically by Step 2.5.1.5 (NOT by 2.5.1).
+
+For each package where:
+- The caller-context FP ratio is **≥ 50%** of that package's `missing-try-catch` violations, AND
+- That package had **≥ 4 `missing-try-catch` violations** in the scan (avoids spurious pauses on tiny scans)
+
+…take action depending on mode:
+
+- **`--auto` mode:** PAUSE. Print a banner:
+  ```
+  ⚠️  Caller-context rule downgraded N of M missing-try-catch violations in <pkg>
+       (ratio: <pct>%, threshold: 50%).
+
+       This usually means the package is using a framework that owns the catch
+       frame (NestJS controller, Express asyncHandler, Fastify setErrorHandler,
+       tRPC errorFormatter), and a project-wide scanner upgrade is more
+       valuable than the per-violation fix loop.
+
+       Quoted catch wraps (sample): <file:line snippet>
+
+       References:
+         • Scanner upgrade ticket: work-packages/scanner-upgrades-todo.md §15
+         • Case study:              work-packages/25-pr-initiative/prs/26-pr-calcom.md
+
+       Options:
+         1. Continue — fix-loop the remaining TPs only (recommended if you've reviewed)
+         2. Abort     — stop and review the per-violation triage before any fixes
+         3. Override  — re-label these as TRUE POSITIVE (rare; only if you've manually
+                        verified the wraps are inadequate)
+  ```
+  Wait for explicit user response before continuing. In `--auto` mode without a user present, default to option 2 (Abort) after a 30-second wait — silent fixes on a probably-FP package erode confidence more than a paused run.
+
+- **Interactive (non-`--auto`) mode:** Print the same banner but proceed automatically with option 1 (continue with TPs only) after acknowledging it in stdout. The user is at the keyboard and can intervene.
+
+Record the pause decision in `state.callerContextPauses[]` for the Phase 5 report:
+```json
+{
+  "package": "<pkg>",
+  "ratio": 0.<pct>,
+  "totalMissingTryCatch": M,
+  "downgradedByCallerContext": N,
+  "decision": "continue" | "abort" | "override",
+  "quotedSampleCatchBody": "<file:line:body>"
+}
+```
+
+This data is the primary feedback signal for §15 in `scanner-upgrades-todo.md` — each high-ratio package is a confirming data point for the scanner upgrade.
 
 ### Step 2.5.3 — Present triage results to user
 
@@ -669,6 +788,16 @@ After completing triage, push labels in two passes: **primary violations first, 
    ```
 
    Add each note to `$SCANNER_ISSUES` for the Phase 5 report (deduplicate by improvement description).
+
+   **Special payload for caller-context FPs (Step 2.5.1.5 origin):** if the LIKELY FALSE POSITIVE label was produced by the caller-context check at 2.5.1.5, the note MUST include the §15 ticket reference and the quoted catch body, so the scanner-upgrades-todo ticket accumulates confirming data points automatically. Use this payload shape:
+   ```
+   Arguments: {
+     violationId: <dashboard violation ID>,
+     note: "Scanner FP (caller-context): <flagged method> is called from <N> caller(s), <K> of which wrap in outer try/catch (<framework or app-code>). Quoted outer catch at <caller-file:line>:\n\n```ts\n<verbatim catch body, <=10 lines>\n```\n\nImprovement opportunity: scanner needs a caller-aware pass that walks importers of the flagged file and inspects outer try/catch around each call site. Ticket: work-packages/scanner-upgrades-todo.md §15 (NestJS controller route-body try/catch + @Redirect ownership). Confirming case study: work-packages/25-pr-initiative/prs/26-pr-calcom.md (calcom/cal.diy PR #29247, closed FP)."
+   }
+   ```
+
+   The verbatim catch quote is mandatory — pointers without quotes have been the failure mode (`feedback_audit_must_read_cited_files.md`). Each caller-context FP that lands on the dashboard with this payload becomes one confirming data point for §15 — the scanner-stream agent can later harvest these by querying the dashboard for notes containing `§15`.
 
 #### Pass B — Sub-violation labels (per-postcondition)
 
@@ -841,7 +970,9 @@ For each TRUE POSITIVE group, assign an impact level:
 
 ### Step 2.6.3 — Write .nark/suppressions.json suppressions for confirmed FPs
 
-After generating the report, also persist the FP findings as actionable suppressions:
+**SKIP THIS STEP ENTIRELY if `--no-suppressions` was passed.** When `--no-suppressions` is set, the skill MUST NOT touch `.nark/suppressions.json` and MUST NOT create the `.nark/` folder in the user repo. Persist FP findings only via the dashboard FALSE_POSITIVE label (Step 2.5.4) and the scanner-issues note (Step 2.6.4). This is the canonical entry point for the bc-nark-fix-coordinator (and other automation operating against an OSS fork being prepared for an upstream PR), where any `.nark/suppressions.json` write would leak into the diff.
+
+Otherwise (default behavior), persist the FP findings as actionable suppressions:
 
 1. **Ensure the `.nark/` folder exists** at `path.dirname(<tsconfig path>)/.nark/` — `mkdir -p` first
 2. **Read or create `.nark/suppressions.json`** at `path.dirname(<tsconfig path>)/.nark/suppressions.json`
