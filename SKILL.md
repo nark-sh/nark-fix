@@ -1,7 +1,7 @@
 # nark-fix Skill
 
 **Trigger:** `/nark-fix`, "nark fix", "fix Nark profile violations", "resolve nark violations", "fix nark errors"
-**Version:** 2.3.0
+**Version:** 2.4.0
 
 Agentic loop that scans a repo for Nark profile violations, triages false positives, pushes TP/FP/resolve feedback to the dashboard via MCP tools, applies DRY fixes package-by-package, and loops until the repo is clean. Each triage decision and fix is recorded in the dashboard for corpus/verify-cli improvement.
 
@@ -25,7 +25,57 @@ Agentic loop that scans a repo for Nark profile violations, triages false positi
 /nark-fix --resume            # Explicitly resume from $NARK_PROJECT_DIR/fix-state.json (same as auto-detection)
 /nark-fix --fresh             # Ignore any existing state file and start over
 /nark-fix --no-suppressions  # Triage FPs as usual but DO NOT write .nark/suppressions.json. Persist FP findings only via dashboard FALSE_POSITIVE labels (or scanner-issues.md). Use when running against a tree where suppressions must not appear in the diff (e.g. an OSS fork being prepared for an upstream PR).
+/nark-fix --diff-only <baseRef>..HEAD   # PR-scoped mode (qt-192). Restrict triage + fix to violations introduced by the diff between baseRef and HEAD (e.g. `origin/main..HEAD`). Skips whole-repo violations. Same scope the GitHub PR bot reports. See "Diff-only Mode (qt-192)" below.
 ```
+
+---
+
+## Diff-only Mode (qt-192)
+
+When invoked with `--diff-only <baseRef>..HEAD`, the skill restricts itself to violations the current PR introduced — matching the scope the GitHub PR bot reports. The default mode triages the whole repo, which is wrong for a PR workflow: it pulls the user into fixing pre-existing debt that's not in their PR's scope.
+
+### What changes vs the default mode
+
+1. **Phase 1 baseline scan** — Instead of triggering a cloud baseline scan over the whole repo, run nark locally with `--diff` to scope to the PR:
+   ```bash
+   npx nark --diff <baseRef>..HEAD --output <state-dir>/baseline.json --tsconfig <resolved-tsconfig>
+   ```
+   The nark CLI's `--diff` flag scans the full program (so types resolve) but reports only violations on lines the diff added/modified. This is the same scope the GitHub PR bot uses for its "new violations" bucket.
+
+   - If git isn't available locally (rare; warn the user), fall back to: run the cloud baseline scan as usual, then in Phase 1.2 filter the violation set to only those whose `file:line` falls inside `git diff --name-only <baseRef>..HEAD` + per-file line ranges from `git diff -U0`.
+
+2. **Phase 1.2 violation ID map** — Build the map from the diff-scoped violation set only. Pre-existing violations are NOT in the map and are NOT subject to triage or fix in this run.
+
+3. **Phase 2+ triage and fix** — Operate on the diff-scoped set. The agent must NEVER expand fixes beyond the diff-changed files. If a fix would require touching a pre-existing file outside the diff, treat it as OUT OF SCOPE and:
+   - Suggest the user open a separate GitHub issue tracking that broader fix
+   - Add a `.nark/suppressions.json` entry for the current PR's flagged callsite with `reason: "tracked in issue #N — out of scope for this PR"`
+   - Continue with remaining diff-scoped violations
+
+4. **Phase 4 commit message** — Mention the diff range in the commit message so reviewers know the scope:
+   ```
+   fix(nark): resolve N new violations introduced in this PR
+   
+   Scope: `<baseRef>..HEAD` (matches Nark bot bucket on the PR comment).
+   Pre-existing violations elsewhere in the repo are unchanged.
+   ```
+
+5. **Phase 5 success criterion** — "zero violations" means zero NEW violations on the diff. Pre-existing violations remain — they're not this run's concern.
+
+### Default baseRef
+
+If the user invokes `--diff-only` without specifying `<baseRef>..HEAD`, default to `origin/main..HEAD`. If the repo's default branch isn't `main`, ask the user once for the right base ref and remember it in the state file.
+
+### Compatibility with other flags
+
+- `--diff-only` + `--audit` → diff-scoped triage report only (no fixes). Recommended for PR review.
+- `--diff-only` + `--auto` → autonomous PR-scoped fix loop. Same auto-compact semantics as the whole-repo --auto mode, but scoped.
+- `--diff-only` + `--batch` → diff-scoped scan-once, fix-all, rescan-once.
+- `--diff-only` + `--package <name>` → diff-scoped, further narrowed to one package. Rare but valid.
+- `--diff-only` + `--no-suppressions` → diff-scoped, do not write suppressions (use dashboard FP labels instead).
+
+### When NOT to use --diff-only
+
+If the user wants to clean up pre-existing technical debt across the repo as a separate effort, omit `--diff-only`. Default whole-repo mode is correct for that. The bot's PR comment recommends `--diff-only` because PR-scoped is the right default for PR work.
 
 ---
 
